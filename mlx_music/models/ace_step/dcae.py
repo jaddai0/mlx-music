@@ -96,11 +96,11 @@ class ResBlock2d(nn.Module):
         residual = x
 
         x = self.norm1(x)
-        x = mx.silu(x)
+        x = nn.silu(x)
         x = self.conv1(x)
 
         x = self.norm2(x)
-        x = mx.silu(x)
+        x = nn.silu(x)
         x = self.conv2(x)
 
         if self.skip is not None:
@@ -324,7 +324,7 @@ class DCAEDecoder(nn.Module):
                 x = block(x)
 
         x = self.norm_out(x)
-        x = mx.silu(x)
+        x = nn.silu(x)
         x = self.conv_out(x)
 
         return x

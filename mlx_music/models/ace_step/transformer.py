@@ -109,19 +109,21 @@ class PatchEmbed(nn.Module):
         Embed patches.
 
         Args:
-            x: Input tensor (batch, channels, height, width)
+            x: Input tensor (batch, channels, height, width) in NCHW format
 
         Returns:
             Sequence tensor (batch, num_patches, embed_dim)
         """
-        # Apply convolutions
+        # Convert NCHW to NHWC for MLX convolutions
+        x = mx.transpose(x, axes=(0, 2, 3, 1))  # (B, H, W, C)
+
+        # Apply convolutions (MLX Conv2d expects NHWC)
         x = self.conv1(x)
-        x = mx.silu(x)
+        x = nn.silu(x)
         x = self.conv2(x)
 
-        # Flatten spatial dimensions: (B, C, H, W) -> (B, H*W, C)
-        batch, channels, height, width = x.shape
-        x = mx.transpose(x, axes=(0, 2, 3, 1))  # (B, H, W, C)
+        # Flatten spatial dimensions: (B, H, W, C) -> (B, H*W, C)
+        batch, height, width, channels = x.shape
         x = x.reshape(batch, height * width, channels)
 
         return x
@@ -327,7 +329,7 @@ class TimestepEmbedding(nn.Module):
 
         # MLP
         embedding = self.linear_1(embedding)
-        embedding = mx.silu(embedding)
+        embedding = nn.silu(embedding)
         embedding = self.linear_2(embedding)
 
         return embedding
