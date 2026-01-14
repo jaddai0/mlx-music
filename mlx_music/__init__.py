@@ -19,6 +19,30 @@ Example:
 
 __version__ = "0.1.0"
 
-from mlx_music.models.ace_step import ACEStep
+# Lazy-loaded modules - improves import time significantly
+_ace_step = None
+
+
+def _get_ace_step():
+    """Lazy load ACEStep model class."""
+    global _ace_step
+    if _ace_step is None:
+        from mlx_music.models.ace_step import ACEStep
+
+        _ace_step = ACEStep
+    return _ace_step
+
+
+def __getattr__(name: str):
+    """Module-level lazy attribute access."""
+    if name == "ACEStep":
+        return _get_ace_step()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    """List available module attributes."""
+    return ["ACEStep", "__version__"]
+
 
 __all__ = ["ACEStep", "__version__"]

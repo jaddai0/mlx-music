@@ -2,77 +2,19 @@
 Mel-spectrogram utilities for mlx-music.
 
 Implements STFT, mel filterbank, and log-mel spectrogram computation.
+Uses cached DSP utilities for efficiency.
 """
 
-import math
-from typing import Optional, Tuple
+from typing import Optional
 
 import mlx.core as mx
-import numpy as np
 
-
-def hann_window(size: int) -> mx.array:
-    """Create a Hann window."""
-    n = mx.arange(size, dtype=mx.float32)
-    return 0.5 - 0.5 * mx.cos(2 * math.pi * n / (size - 1))
-
-
-def mel_filterbank(
-    n_mels: int = 128,
-    n_fft: int = 2048,
-    sample_rate: int = 44100,
-    f_min: float = 40.0,
-    f_max: Optional[float] = 16000.0,
-) -> mx.array:
-    """
-    Create a mel filterbank matrix.
-
-    Args:
-        n_mels: Number of mel bands
-        n_fft: FFT size
-        sample_rate: Audio sample rate
-        f_min: Minimum frequency
-        f_max: Maximum frequency
-
-    Returns:
-        Filterbank matrix of shape (n_mels, n_fft // 2 + 1)
-    """
-    if f_max is None:
-        f_max = sample_rate / 2
-
-    # Mel scale conversion
-    def hz_to_mel(f):
-        return 2595.0 * np.log10(1.0 + f / 700.0)
-
-    def mel_to_hz(m):
-        return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
-
-    # Create mel points
-    mel_min = hz_to_mel(f_min)
-    mel_max = hz_to_mel(f_max)
-    mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
-    hz_points = mel_to_hz(mel_points)
-
-    # Create filterbank
-    n_freqs = n_fft // 2 + 1
-    freq_bins = np.linspace(0, sample_rate / 2, n_freqs)
-
-    filterbank = np.zeros((n_mels, n_freqs))
-
-    for i in range(n_mels):
-        left = hz_points[i]
-        center = hz_points[i + 1]
-        right = hz_points[i + 2]
-
-        # Left slope
-        left_mask = (freq_bins >= left) & (freq_bins <= center)
-        filterbank[i, left_mask] = (freq_bins[left_mask] - left) / (center - left + 1e-10)
-
-        # Right slope
-        right_mask = (freq_bins >= center) & (freq_bins <= right)
-        filterbank[i, right_mask] = (right - freq_bins[right_mask]) / (right - center + 1e-10)
-
-    return mx.array(filterbank, dtype=mx.float32)
+# Import cached DSP functions
+from mlx_music.utils.dsp import (
+    hanning as hann_window,
+    mel_filterbank,
+    get_stft_window,
+)
 
 
 def stft(
@@ -91,7 +33,7 @@ def stft(
         n_fft: FFT size
         hop_length: Hop length between frames
         win_length: Window length (defaults to n_fft)
-        window: Window function (defaults to Hann)
+        window: Window function (defaults to Hann, cached)
         center: Whether to pad input for centering
 
     Returns:
@@ -100,11 +42,11 @@ def stft(
     if win_length is None:
         win_length = n_fft
 
+    # Use cached window if not provided
     if window is None:
-        window = hann_window(win_length)
-
-    # Pad window if needed
-    if win_length < n_fft:
+        window = get_stft_window(win_length, n_fft, "hann")
+    elif win_length < n_fft:
+        # Pad user-provided window if needed
         pad_amount = n_fft - win_length
         pad_left = pad_amount // 2
         pad_right = pad_amount - pad_left
@@ -168,7 +110,7 @@ def istft(
         stft_matrix: Complex STFT (..., freq, time)
         hop_length: Hop length
         win_length: Window length
-        window: Window function
+        window: Window function (defaults to Hann, cached)
         n_fft: FFT size (inferred from stft_matrix if None)
         length: Output length (truncate/pad to this)
 
@@ -181,11 +123,11 @@ def istft(
     if win_length is None:
         win_length = n_fft
 
+    # Use cached window if not provided
     if window is None:
-        window = hann_window(win_length)
-
-    # Pad window if needed
-    if win_length < n_fft:
+        window = get_stft_window(win_length, n_fft, "hann")
+    elif win_length < n_fft:
+        # Pad user-provided window if needed
         pad_amount = n_fft - win_length
         pad_left = pad_amount // 2
         pad_right = pad_amount - pad_left
@@ -252,6 +194,8 @@ class LogMelSpectrogram:
 
     Converts audio waveforms to log-mel spectrograms for
     input to the DCAE encoder.
+
+    Uses cached mel filterbanks and window functions for efficiency.
     """
 
     def __init__(
@@ -261,7 +205,7 @@ class LogMelSpectrogram:
         win_length: int = 2048,
         hop_length: int = 512,
         n_mels: int = 128,
-        f_min: float = 40.0,
+        f_min: float = 0.0,
         f_max: float = 16000.0,
     ):
         self.sample_rate = sample_rate
@@ -272,7 +216,7 @@ class LogMelSpectrogram:
         self.f_min = f_min
         self.f_max = f_max
 
-        # Pre-compute filterbank and window
+        # Use cached filterbank (automatically cached by lru_cache)
         self.mel_fb = mel_filterbank(
             n_mels=n_mels,
             n_fft=n_fft,
@@ -280,7 +224,8 @@ class LogMelSpectrogram:
             f_min=f_min,
             f_max=f_max,
         )
-        self.window = hann_window(win_length)
+        # Use cached window
+        self.window = get_stft_window(win_length, n_fft, "hann")
 
     def __call__(self, waveform: mx.array) -> mx.array:
         """

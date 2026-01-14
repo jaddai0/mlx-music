@@ -110,8 +110,13 @@ class ACEStep:
         """
         Load ACE-Step from pretrained weights.
 
+        Supports both local paths and HuggingFace Hub repository IDs.
+
         Args:
             model_path: Path to model directory or HuggingFace repo ID
+                Examples:
+                - "/path/to/local/model" (local path)
+                - "ACE-Step/ACE-Step-v1-3.5B" (HuggingFace repo)
             dtype: Data type for model weights
             load_text_encoder: Whether to load text encoder
             load_audio_pipeline: Whether to load DCAE + vocoder (needed for audio output)
@@ -119,12 +124,8 @@ class ACEStep:
         Returns:
             ACEStep instance
         """
-        model_path = Path(model_path)
-
-        # Download from HuggingFace if needed
-        if not model_path.exists():
-            print(f"Downloading model from {model_path}...")
-            model_path = download_model(str(model_path))
+        # Resolve path (handles both local paths and HuggingFace repo IDs)
+        model_path = download_model(str(model_path))
 
         # Load transformer weights and config
         print("Loading transformer...")
@@ -138,8 +139,8 @@ class ACEStep:
         # Create transformer
         transformer = ACEStepTransformer(config)
 
-        # Load weights into transformer
-        transformer.load_weights(list(weights.items()))
+        # Load weights into transformer (strict=False allows for extra weights like lyric_encoder)
+        transformer.load_weights(list(weights.items()), strict=False)
 
         # Initialize additional components
         text_encoder = None
@@ -254,7 +255,6 @@ class ACEStep:
         # Convert to numpy
         return np.array(audio, dtype=np.float32)
 
-    @mx.compile
     def _transformer_forward(
         self,
         latents: mx.array,
@@ -265,12 +265,15 @@ class ACEStep:
         lyric_tokens: Optional[mx.array],
         lyric_mask: Optional[mx.array],
     ) -> mx.array:
-        """Compiled transformer forward pass."""
+        """Transformer forward pass.
+
+        Note: @mx.compile removed due to issues with Optional parameters.
+        """
         return self.transformer(
             hidden_states=latents,
             timestep=timestep,
-            encoder_hidden_states=text_embeds,
-            encoder_attention_mask=text_mask,
+            encoder_text_hidden_states=text_embeds,
+            text_attention_mask=text_mask,
             speaker_embeds=speaker_embeds,
             lyric_token_idx=lyric_tokens,
             lyric_mask=lyric_mask,

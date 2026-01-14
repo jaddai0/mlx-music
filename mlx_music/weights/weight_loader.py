@@ -130,37 +130,68 @@ def load_sharded_safetensors(
     return weights
 
 
+def is_local_path(path_or_repo: str) -> bool:
+    """Check if the input is a local path rather than a HuggingFace repo ID."""
+    # A local path starts with /, ~, or .
+    # A repo ID is in the form "org/repo" or "repo"
+    if path_or_repo.startswith(("/", "~", ".")) or Path(path_or_repo).exists():
+        return True
+    # Check for Windows-style paths
+    if len(path_or_repo) > 1 and path_or_repo[1] == ":":
+        return True
+    return False
+
+
 def download_model(
-    repo_id: str,
+    model_id: str,
     local_dir: Optional[Union[str, Path]] = None,
     revision: Optional[str] = None,
 ) -> Path:
     """
-    Download a model from HuggingFace Hub.
+    Get or download a model from HuggingFace Hub.
+
+    Supports both local paths and HuggingFace repository IDs.
 
     Args:
-        repo_id: HuggingFace repository ID (e.g., "ACE-Step/ACE-Step-v1-3.5B")
-        local_dir: Local directory to save the model
-        revision: Specific revision/branch to download
+        model_id: Local path or HuggingFace repository ID (e.g., "ACE-Step/ACE-Step-v1-3.5B")
+        local_dir: Local directory to save the model (only used for HF downloads)
+        revision: Specific revision/branch to download (only used for HF downloads)
 
     Returns:
-        Path to the downloaded model directory
+        Path to the model directory
+
+    Examples:
+        >>> download_model("/path/to/local/model")  # Local path
+        >>> download_model("ACE-Step/ACE-Step-v1-3.5B")  # HuggingFace repo
+        >>> download_model("ACE-Step/ACE-Step-v1-3.5B", revision="v1.0")  # Specific version
     """
+    # Handle local paths directly
+    if is_local_path(model_id):
+        model_path = Path(model_id).expanduser().resolve()
+        if not model_path.exists():
+            raise FileNotFoundError(f"Local model path not found: {model_path}")
+        return model_path
+
+    # Download from HuggingFace Hub
+    print(f"Downloading model from HuggingFace Hub: {model_id}...")
+
     try:
-        # Try offline first
+        # Try offline first (cached models)
         model_path = Path(snapshot_download(
-            repo_id,
+            model_id,
             local_dir=str(local_dir) if local_dir else None,
             revision=revision,
             local_files_only=True,
         ))
+        print("Using cached model.")
     except Exception:
         # Fall back to network download
         model_path = Path(snapshot_download(
-            repo_id,
+            model_id,
             local_dir=str(local_dir) if local_dir else None,
             revision=revision,
         ))
+        print("Download complete.")
 
     return model_path
 
