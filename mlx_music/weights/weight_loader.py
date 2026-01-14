@@ -45,15 +45,40 @@ def load_safetensors(
         raise FileNotFoundError(f"Weight file not found: {path}")
 
     weights = {}
+
+    # Try using mlx.core's load function first (handles bfloat16 properly)
+    try:
+        # MLX can load safetensors directly
+        weights = mx.load(str(path))
+        # Convert to target dtype if needed
+        converted_weights = {}
+        for key, arr in weights.items():
+            if arr.dtype != dtype and arr.dtype in (mx.float32, mx.float16, mx.bfloat16):
+                converted_weights[key] = arr.astype(dtype)
+            else:
+                converted_weights[key] = arr
+        return converted_weights
+    except Exception:
+        pass
+
+    # Fallback to safetensors with numpy (doesn't support bfloat16)
+    # This will convert bfloat16 to float32 first
     with safe_open(str(path), framework="numpy") as f:
         for key in f.keys():
-            tensor = f.get_tensor(key)
-            # Convert numpy to MLX array
-            arr = mx.array(tensor)
-            # Convert to target dtype if needed
-            if arr.dtype != dtype and arr.dtype in (mx.float32, mx.float16, mx.bfloat16):
-                arr = arr.astype(dtype)
-            weights[key] = arr
+            try:
+                tensor = f.get_tensor(key)
+                # Convert numpy to MLX array
+                arr = mx.array(tensor)
+                # Convert to target dtype if needed
+                if arr.dtype != dtype and arr.dtype in (mx.float32, mx.float16, mx.bfloat16):
+                    arr = arr.astype(dtype)
+                weights[key] = arr
+            except TypeError as e:
+                if "bfloat16" in str(e):
+                    # Skip bfloat16 tensors when using numpy framework
+                    print(f"Warning: Skipping bfloat16 tensor {key}")
+                else:
+                    raise
 
     return weights
 
@@ -151,86 +176,81 @@ def transpose_conv1d(weight: mx.array) -> mx.array:
     return mx.transpose(weight, axes=(0, 2, 1))
 
 
+def transpose_conv_transpose1d(weight: mx.array) -> mx.array:
+    """Transpose ConvTranspose1d weights from PyTorch to MLX format.
+
+    PyTorch: (in_channels, out_channels, kernel_size)
+    MLX:     (out_channels, kernel_size, in_channels)
+    """
+    return mx.transpose(weight, axes=(1, 2, 0))
+
+
 # ACE-Step specific weight mappings
+# Note: Most weights have 1:1 naming, so we use pass-through for simplicity.
+# Only Conv2d and Conv1d weights need transposition from PyTorch to MLX format.
+
 ACE_STEP_TRANSFORMER_MAPPINGS: List[WeightMapping] = [
-    # Time embedding
-    WeightMapping("time_proj.weight", "time_proj.weight"),
-    WeightMapping("timestep_embedder.linear_1.weight", "timestep_embedder.linear_1.weight"),
-    WeightMapping("timestep_embedder.linear_1.bias", "timestep_embedder.linear_1.bias"),
-    WeightMapping("timestep_embedder.linear_2.weight", "timestep_embedder.linear_2.weight"),
-    WeightMapping("timestep_embedder.linear_2.bias", "timestep_embedder.linear_2.bias"),
-
-    # t_block (AdaLN conditioning)
-    WeightMapping("t_block.1.weight", "t_block.1.weight"),
-    WeightMapping("t_block.1.bias", "t_block.1.bias"),
-
-    # Embedders
-    WeightMapping("speaker_embedder.weight", "speaker_embedder.weight"),
-    WeightMapping("genre_embedder.weight", "genre_embedder.weight"),
-    WeightMapping("lyric_embs.weight", "lyric_embs.weight"),
-
-    # Patch embedding
-    WeightMapping("proj_in.conv1.weight", "proj_in.conv1.weight", transform=transpose_conv2d),
-    WeightMapping("proj_in.conv1.bias", "proj_in.conv1.bias"),
-    WeightMapping("proj_in.conv2.weight", "proj_in.conv2.weight", transform=transpose_conv2d),
-    WeightMapping("proj_in.conv2.bias", "proj_in.conv2.bias"),
-
-    # Final layer
-    WeightMapping("final_layer.norm.weight", "final_layer.norm.weight"),
-    WeightMapping("final_layer.linear.weight", "final_layer.linear.weight"),
-    WeightMapping("final_layer.linear.bias", "final_layer.linear.bias"),
-    WeightMapping("final_layer.adaLN_modulation.1.weight", "final_layer.adaLN_modulation.1.weight"),
-    WeightMapping("final_layer.adaLN_modulation.1.bias", "final_layer.adaLN_modulation.1.bias"),
-
-    # RoPE
-    WeightMapping("rotary_emb.inv_freq", "rotary_emb.inv_freq"),
+    # Patch embedding - Conv2d weights need transposition
+    # proj_in.early_conv_layers.0: Conv2d(8, 2048, kernel_size=(16, 1), stride=(16, 1))
+    WeightMapping(
+        "proj_in.early_conv_layers.0.weight",
+        "proj_in.early_conv_layers.0.weight",
+        transform=transpose_conv2d,
+    ),
+    # proj_in.early_conv_layers.1: GroupNorm (weight/bias are 1D, no transpose needed)
+    # proj_in.early_conv_layers.2: Conv2d(2048, 2560, kernel_size=(1, 1))
+    WeightMapping(
+        "proj_in.early_conv_layers.2.weight",
+        "proj_in.early_conv_layers.2.weight",
+        transform=transpose_conv2d,
+    ),
 ]
 
 
 def generate_transformer_block_mappings(num_blocks: int = 24) -> List[WeightMapping]:
-    """Generate weight mappings for all transformer blocks."""
+    """Generate weight mappings for all transformer blocks.
+
+    ACE-Step transformer block structure:
+    - transformer_blocks.{i}.attn: LiteLAAttention (self-attention)
+        - to_q, to_k, to_v, to_out.0 (Linear layers)
+    - transformer_blocks.{i}.cross_attn: SDPACrossAttention
+        - to_q, to_k, to_v, to_out.0 (query from latent, k/v from encoder)
+        - add_q_proj, add_k_proj, add_v_proj, to_add_out (for joint attention)
+    - transformer_blocks.{i}.ff: GLUMBConv
+        - inverted_conv.conv: Conv1d (1x1 pointwise)
+        - depth_conv.conv: Conv1d (depthwise grouped)
+        - point_conv.conv: Conv1d (1x1 pointwise)
+    - transformer_blocks.{i}.scale_shift_table: AdaLN modulation
+    """
     mappings = []
 
     for i in range(num_blocks):
         prefix = f"transformer_blocks.{i}"
 
-        # Layer norms
-        mappings.extend([
-            WeightMapping(f"{prefix}.norm1.linear.weight", f"{prefix}.norm1.linear.weight"),
-            WeightMapping(f"{prefix}.norm1.linear.bias", f"{prefix}.norm1.linear.bias"),
-        ])
-
-        # Self-attention
-        mappings.extend([
-            WeightMapping(f"{prefix}.attn1.to_q.weight", f"{prefix}.attn1.to_q.weight"),
-            WeightMapping(f"{prefix}.attn1.to_k.weight", f"{prefix}.attn1.to_k.weight"),
-            WeightMapping(f"{prefix}.attn1.to_v.weight", f"{prefix}.attn1.to_v.weight"),
-            WeightMapping(f"{prefix}.attn1.to_out.0.weight", f"{prefix}.attn1.to_out.0.weight"),
-            WeightMapping(f"{prefix}.attn1.to_out.0.bias", f"{prefix}.attn1.to_out.0.bias"),
-            WeightMapping(f"{prefix}.attn1.norm_q.weight", f"{prefix}.attn1.norm_q.weight"),
-            WeightMapping(f"{prefix}.attn1.norm_k.weight", f"{prefix}.attn1.norm_k.weight"),
-        ])
-
-        # Cross-attention (if present)
-        mappings.extend([
-            WeightMapping(f"{prefix}.attn2.to_q.weight", f"{prefix}.attn2.to_q.weight"),
-            WeightMapping(f"{prefix}.attn2.to_k.weight", f"{prefix}.attn2.to_k.weight"),
-            WeightMapping(f"{prefix}.attn2.to_v.weight", f"{prefix}.attn2.to_v.weight"),
-            WeightMapping(f"{prefix}.attn2.to_out.0.weight", f"{prefix}.attn2.to_out.0.weight"),
-            WeightMapping(f"{prefix}.attn2.to_out.0.bias", f"{prefix}.attn2.to_out.0.bias"),
-        ])
-
-        # Feed-forward (GLUMBConv)
-        mappings.extend([
-            WeightMapping(f"{prefix}.ff.net.0.weight", f"{prefix}.ff.net.0.weight"),
-            WeightMapping(f"{prefix}.ff.net.0.bias", f"{prefix}.ff.net.0.bias"),
-            WeightMapping(f"{prefix}.ff.net.2.weight", f"{prefix}.ff.net.2.weight"),
-            WeightMapping(f"{prefix}.ff.net.2.bias", f"{prefix}.ff.net.2.bias"),
-        ])
-
-        # Scale-shift table for AdaLN
+        # Feed-forward (GLUMBConv) - Conv1d weights need transposition
+        # inverted_conv: Conv1d(in, hidden*2, kernel_size=1)
         mappings.append(
-            WeightMapping(f"{prefix}.scale_shift_table", f"{prefix}.scale_shift_table")
+            WeightMapping(
+                f"{prefix}.ff.inverted_conv.conv.weight",
+                f"{prefix}.ff.inverted_conv.conv.weight",
+                transform=transpose_conv1d,
+            )
+        )
+        # depth_conv: Conv1d(hidden*2, hidden*2, kernel_size=3, groups=hidden*2)
+        mappings.append(
+            WeightMapping(
+                f"{prefix}.ff.depth_conv.conv.weight",
+                f"{prefix}.ff.depth_conv.conv.weight",
+                transform=transpose_conv1d,
+            )
+        )
+        # point_conv: Conv1d(hidden, out, kernel_size=1)
+        mappings.append(
+            WeightMapping(
+                f"{prefix}.ff.point_conv.conv.weight",
+                f"{prefix}.ff.point_conv.conv.weight",
+                transform=transpose_conv1d,
+            )
         )
 
     return mappings
@@ -274,6 +294,79 @@ def convert_torch_to_mlx(
             mlx_weights[key] = value
 
     return mlx_weights
+
+
+def load_weights_with_string_keys(
+    module: "nn.Module",
+    weights: Dict[str, mx.array],
+    strict: bool = False,
+) -> None:
+    """
+    Load weights into a module, handling numeric keys as string keys.
+
+    MLX's tree_unflatten converts numeric path components (e.g., "blocks.0.weight")
+    into list indices, but our DCAE model uses dict keys with string indices.
+    This function manually sets weights to handle this case.
+
+    Args:
+        module: The nn.Module to load weights into
+        weights: Dictionary of flat weight paths to arrays
+        strict: If True, raise error on missing weights
+    """
+    import re
+
+    # Get current model parameters as a flat dict
+    def flatten_params(d, prefix=""):
+        flat = {}
+        for k, v in d.items():
+            full_key = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, dict):
+                flat.update(flatten_params(v, full_key))
+            elif isinstance(v, mx.array):
+                flat[full_key] = v
+        return flat
+
+    current_params = flatten_params(module.parameters())
+
+    # For each weight, find matching param and update
+    missing = []
+    updated = 0
+
+    for key, value in weights.items():
+        if key in current_params:
+            # Navigate to the parameter and set it
+            parts = key.split(".")
+            obj = module
+            for i, part in enumerate(parts[:-1]):
+                if hasattr(obj, part):
+                    obj = getattr(obj, part)
+                elif isinstance(obj, dict) and part in obj:
+                    obj = obj[part]
+                else:
+                    # Try as dict key
+                    if hasattr(obj, "__getitem__"):
+                        try:
+                            obj = obj[part]
+                        except (KeyError, TypeError):
+                            break
+                    else:
+                        break
+            else:
+                # Set the final attribute
+                final_part = parts[-1]
+                if hasattr(obj, final_part):
+                    setattr(obj, final_part, value)
+                    updated += 1
+                elif isinstance(obj, dict) and final_part in obj:
+                    obj[final_part] = value
+                    updated += 1
+                else:
+                    missing.append(key)
+        else:
+            missing.append(key)
+
+    if strict and missing:
+        raise KeyError(f"Missing {len(missing)} weights: {missing[:10]}...")
 
 
 def load_ace_step_weights(

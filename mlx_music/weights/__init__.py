@@ -9,7 +9,9 @@ from mlx_music.weights.quantization import (
     QuantizationConfig,
     QuantizationMode,
     quantize_model,
-    quantize_weights,
+    get_model_size,
+    save_quantized_model,
+    load_quantization_config,
 )
 
 __all__ = [
@@ -19,5 +21,7 @@ __all__ = [
     "QuantizationConfig",
     "QuantizationMode",
     "quantize_model",
-    "quantize_weights",
+    "get_model_size",
+    "save_quantized_model",
+    "load_quantization_config",
 ]
