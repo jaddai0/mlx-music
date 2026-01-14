@@ -428,6 +428,9 @@ class HiFiGANHead(nn.Module):
                     xs = xs + self.resblocks[str(rb_idx)](x)
             x = xs / self.num_kernels
 
+            # Evaluate after each upsample stage to prevent graph explosion
+            mx.eval(x)
+
         x = nn.leaky_relu(x, negative_slope=0.1)
         x = self.conv_post(x)
         x = mx.tanh(x)

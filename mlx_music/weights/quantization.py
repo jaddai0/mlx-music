@@ -144,7 +144,11 @@ def quantize_model(
 
     # Create predicate for nn.quantize
     def class_predicate(path: str, module: nn.Module) -> Union[bool, dict]:
-        """Determine if/how to quantize a module."""
+        """Determine if/how to quantize a module.
+
+        Always returns a dict with explicit bits to avoid relying on
+        the default bits parameter in nn.quantize().
+        """
         if _should_exclude(path, config):
             return False
 
@@ -152,17 +156,17 @@ def quantize_model(
         if not isinstance(module, nn.Linear):
             return False
 
-        bits = _get_bits_for_layer(path, config)
-        if bits >= 16:
+        layer_bits = _get_bits_for_layer(path, config)
+        if layer_bits >= 16:
             return False
 
-        return {"group_size": config.group_size, "bits": bits}
+        # Always return dict with explicit bits - don't rely on nn.quantize default
+        return {"group_size": config.group_size, "bits": layer_bits}
 
-    # Apply quantization
+    # Apply quantization - class_predicate always returns dict with bits,
+    # so these defaults are only fallbacks and shouldn't be used
     nn.quantize(
         model,
-        group_size=config.group_size,
-        bits=4 if config.mode == QuantizationMode.INT4 else 8,
         class_predicate=class_predicate,
     )
 

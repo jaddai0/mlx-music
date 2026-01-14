@@ -58,8 +58,12 @@ def load_safetensors(
             else:
                 converted_weights[key] = arr
         return converted_weights
-    except Exception:
-        pass
+    except FileNotFoundError:
+        raise  # Re-raise file not found errors
+    except (RuntimeError, ValueError) as e:
+        # MLX load failed (possibly format issue), fall back to safetensors
+        import warnings
+        warnings.warn(f"MLX native load failed for {path}, falling back to safetensors: {e}")
 
     # Fallback to safetensors with numpy (doesn't support bfloat16)
     # This will convert bfloat16 to float32 first

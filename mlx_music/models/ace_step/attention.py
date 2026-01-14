@@ -411,7 +411,7 @@ class LiteLAAttention(nn.Module):
             mask = attention_mask[:, None, :, None].astype(key.dtype)
             key = key * mask
             # For value: (batch, heads, head_dim, seq) needs (batch, 1, 1, seq)
-            value = value * mask.transpose(0, 1, 3, 2)
+            value = value * mx.transpose(mask, axes=(0, 1, 3, 2))
 
         # ReLU kernel activation
         query = mx.maximum(query, 0)

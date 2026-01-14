@@ -52,8 +52,10 @@ class GroupNorm2d(nn.Module):
         batch, h, w, c = x.shape
         group_size = c // self.num_groups
         x = x.reshape(batch, h, w, self.num_groups, group_size)
-        mean = mx.mean(x, axis=-1, keepdims=True)
-        var = mx.var(x, axis=-1, keepdims=True)
+        # GroupNorm normalizes over spatial dims (h, w) AND channels within each group
+        # For shape (batch, h, w, groups, group_size), normalize over axes (1, 2, 4)
+        mean = mx.mean(x, axis=(1, 2, 4), keepdims=True)
+        var = mx.var(x, axis=(1, 2, 4), keepdims=True)
         x = (x - mean) / mx.sqrt(var + self.eps)
         x = x.reshape(batch, h, w, c)
         return x * self.weight + self.bias
@@ -423,6 +425,8 @@ class DCAEEncoder(nn.Module):
         for block_idx, sub_indices in self._block_order:
             for sub_idx in sub_indices:
                 x = self.down_blocks[block_idx][sub_idx](x)
+            # Evaluate after each major block to prevent graph explosion
+            mx.eval(x)
 
         x = self.conv_out(x)
         return x
@@ -507,6 +511,8 @@ class DCAEDecoder(nn.Module):
         for block_idx, sub_indices in self._block_order:
             for sub_idx in sub_indices:
                 x = self.up_blocks[block_idx][sub_idx](x)
+            # Evaluate after each major block to prevent graph explosion
+            mx.eval(x)
 
         x = self.norm_out(x)
         x = nn.silu(x)

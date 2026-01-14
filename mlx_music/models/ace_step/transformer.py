@@ -88,9 +88,10 @@ class GroupNormLayer(nn.Module):
         # Reshape for group norm: (B, H, W, G, C//G)
         x = x.reshape(batch, h, w, self.num_groups, group_size)
 
-        # Normalize over last axis (within each group)
-        mean = mx.mean(x, axis=-1, keepdims=True)
-        var = mx.var(x, axis=-1, keepdims=True)
+        # GroupNorm normalizes over spatial dims (h, w) AND channels within each group
+        # For shape (batch, h, w, groups, group_size), normalize over axes (1, 2, 4)
+        mean = mx.mean(x, axis=(1, 2, 4), keepdims=True)
+        var = mx.var(x, axis=(1, 2, 4), keepdims=True)
         x = (x - mean) / mx.sqrt(var + self.eps)
 
         # Reshape back
@@ -508,7 +509,7 @@ class ACEStepTransformer(nn.Module):
         )
 
         # Transformer blocks
-        for block in self.transformer_blocks:
+        for i, block in enumerate(self.transformer_blocks):
             hidden_states = block(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -518,6 +519,9 @@ class ACEStepTransformer(nn.Module):
                 rotary_freqs_cis_cross=encoder_rotary_freqs_cis,
                 temb=temb,
             )
+            # Evaluate every 6 blocks to prevent graph explosion
+            if (i + 1) % 6 == 0:
+                mx.eval(hidden_states)
 
         # Final layer
         output = self.final_layer(hidden_states, embedded_timestep, output_length)
