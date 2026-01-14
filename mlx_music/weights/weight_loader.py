@@ -133,6 +133,24 @@ def download_model(
     return model_path
 
 
+def transpose_conv2d(weight: mx.array) -> mx.array:
+    """Transpose Conv2d weights from PyTorch to MLX format.
+
+    PyTorch: (out_channels, in_channels, height, width)
+    MLX:     (out_channels, height, width, in_channels)
+    """
+    return mx.transpose(weight, axes=(0, 2, 3, 1))
+
+
+def transpose_conv1d(weight: mx.array) -> mx.array:
+    """Transpose Conv1d weights from PyTorch to MLX format.
+
+    PyTorch: (out_channels, in_channels, kernel_size)
+    MLX:     (out_channels, kernel_size, in_channels)
+    """
+    return mx.transpose(weight, axes=(0, 2, 1))
+
+
 # ACE-Step specific weight mappings
 ACE_STEP_TRANSFORMER_MAPPINGS: List[WeightMapping] = [
     # Time embedding
@@ -167,24 +185,6 @@ ACE_STEP_TRANSFORMER_MAPPINGS: List[WeightMapping] = [
     # RoPE
     WeightMapping("rotary_emb.inv_freq", "rotary_emb.inv_freq"),
 ]
-
-
-def transpose_conv2d(weight: mx.array) -> mx.array:
-    """Transpose Conv2d weights from PyTorch to MLX format.
-
-    PyTorch: (out_channels, in_channels, height, width)
-    MLX:     (out_channels, height, width, in_channels)
-    """
-    return mx.transpose(weight, axes=(0, 2, 3, 1))
-
-
-def transpose_conv1d(weight: mx.array) -> mx.array:
-    """Transpose Conv1d weights from PyTorch to MLX format.
-
-    PyTorch: (out_channels, in_channels, kernel_size)
-    MLX:     (out_channels, kernel_size, in_channels)
-    """
-    return mx.transpose(weight, axes=(0, 2, 1))
 
 
 def generate_transformer_block_mappings(num_blocks: int = 24) -> List[WeightMapping]:

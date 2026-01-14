@@ -7,7 +7,9 @@ from mlx_music.weights.weight_loader import (
 )
 from mlx_music.weights.quantization import (
     QuantizationConfig,
+    QuantizationMode,
     quantize_model,
+    quantize_weights,
 )
 
 __all__ = [
@@ -15,5 +17,7 @@ __all__ = [
     "load_ace_step_weights",
     "convert_torch_to_mlx",
     "QuantizationConfig",
+    "QuantizationMode",
     "quantize_model",
+    "quantize_weights",
 ]
