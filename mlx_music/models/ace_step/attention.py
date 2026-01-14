@@ -82,6 +82,8 @@ class Qwen2RotaryEmbedding(nn.Module):
         emb = mx.concatenate([freqs, freqs], axis=-1)
         self.cos_cached = mx.cos(emb)
         self.sin_cached = mx.sin(emb)
+        # Evaluate cache to prevent graph accumulation on rebuild
+        mx.eval(self.cos_cached, self.sin_cached)
 
     def __call__(self, x: mx.array, seq_len: Optional[int] = None) -> Tuple[mx.array, mx.array]:
         """
@@ -436,8 +438,9 @@ class LiteLAAttention(nn.Module):
         # out: (batch, heads, head_dim+1, seq)
         out = mx.matmul(vk, query)
 
-        # Normalize using the padded row
-        out = out[:, :, :-1] / (out[:, :, -1:] + self.eps)
+        # Normalize using the padded row (use mx.maximum for extra stability)
+        normalizer = mx.maximum(out[:, :, -1:], self.eps)
+        out = out[:, :, :-1] / normalizer
 
         # Reshape back: (batch, heads, head_dim, seq) -> (batch, seq, heads * head_dim)
         out = mx.transpose(out, axes=(0, 3, 1, 2))  # (batch, seq, heads, head_dim)

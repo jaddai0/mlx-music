@@ -545,6 +545,15 @@ class DCAE(nn.Module):
         Returns:
             Latent (batch, 8, H, W) in NCHW format
         """
+        if mel.ndim != 4:
+            raise ValueError(
+                f"Expected 4D input (batch, channels, height, width), got {mel.ndim}D"
+            )
+        if mel.shape[1] != 2:
+            raise ValueError(
+                f"Expected 2 channels (stereo mel), got {mel.shape[1]} channels"
+            )
+
         # Convert NCHW to NHWC for MLX convolutions
         mel = mx.transpose(mel, axes=(0, 2, 3, 1))  # (B, H, W, C)
 
@@ -568,6 +577,16 @@ class DCAE(nn.Module):
         Returns:
             Mel-spectrogram (batch, 2, 128, time) in NCHW format
         """
+        if latent.ndim != 4:
+            raise ValueError(
+                f"Expected 4D input (batch, channels, height, width), got {latent.ndim}D"
+            )
+        if latent.shape[1] != self.config.latent_channels:
+            raise ValueError(
+                f"Expected {self.config.latent_channels} latent channels, "
+                f"got {latent.shape[1]} channels"
+            )
+
         # Unscale latent
         latent = latent / self.config.scale_factor + self.config.shift_factor
 

@@ -74,6 +74,11 @@ class GroupNormLayer(nn.Module):
 
     def __init__(self, num_groups: int, num_channels: int, eps: float = 1e-6):
         super().__init__()
+        if num_channels % num_groups != 0:
+            raise ValueError(
+                f"num_channels ({num_channels}) must be divisible by "
+                f"num_groups ({num_groups})"
+            )
         self.num_groups = num_groups
         self.num_channels = num_channels
         self.eps = eps
@@ -92,7 +97,10 @@ class GroupNormLayer(nn.Module):
         # For shape (batch, h, w, groups, group_size), normalize over axes (1, 2, 4)
         mean = mx.mean(x, axis=(1, 2, 4), keepdims=True)
         var = mx.var(x, axis=(1, 2, 4), keepdims=True)
-        x = (x - mean) / mx.sqrt(var + self.eps)
+        # Use mx.maximum for numerical stability - ensures valid denominator even with
+        # extremely small or negative variance from bfloat16 precision issues
+        std = mx.sqrt(mx.maximum(var, self.eps))
+        x = (x - mean) / std
 
         # Reshape back
         x = x.reshape(batch, h, w, c)

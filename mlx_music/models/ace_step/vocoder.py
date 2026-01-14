@@ -441,7 +441,8 @@ class HiFiGANHead(nn.Module):
                     xs = self.resblocks[str(rb_idx)](x)
                 else:
                     xs = xs + self.resblocks[str(rb_idx)](x)
-            x = xs / self.num_kernels
+            # Use float multiplication instead of integer division for clarity
+            x = xs * (1.0 / self.num_kernels)
 
             # Evaluate after each upsample stage to prevent graph explosion
             mx.eval(x)
