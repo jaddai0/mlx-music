@@ -38,6 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+text-encoder = [
+    "torch>=2.0.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -45,13 +48,16 @@ dev = [
     "isort>=5.13.0",
     "mypy>=1.8.0",
 ]
+all = [
+    "mlx-music[text-encoder,dev]",
+]
 
 [project.scripts]
 mlx-music = "mlx_music.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mlx-music/mlx-music"
-Repository = "https://github.com/mlx-music/mlx-music"
+Homepage = "https://github.com/Dfunk55/mlx-music"
+Repository = "https://github.com/Dfunk55/mlx-music"
 
 [tool.setuptools.packages.find]
 where = ["."]

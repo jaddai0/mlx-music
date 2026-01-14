@@ -19,6 +19,7 @@ from mlx_music.models.ace_step.scheduler import (
     get_scheduler,
     retrieve_timesteps,
 )
+from mlx_music.models.ace_step.text_encoder import get_text_encoder
 from mlx_music.models.ace_step.transformer import ACEStepConfig, ACEStepTransformer
 from mlx_music.models.ace_step.vocoder import HiFiGANVocoder, MusicDCAEPipeline
 from mlx_music.weights.weight_loader import (
@@ -145,8 +146,24 @@ class ACEStep:
         audio_pipeline = None
 
         if load_text_encoder:
-            print("Text encoder loading not yet implemented - using placeholder")
-            # TODO: Load UMT5 encoder
+            print("Loading text encoder (UMT5)...")
+            try:
+                # Determine device for PyTorch encoder
+                import platform
+                if platform.system() == "Darwin":
+                    device = "mps" if hasattr(mx, "metal") else "cpu"
+                else:
+                    device = "cuda" if mx.metal.is_available() else "cpu"
+
+                text_encoder = get_text_encoder(
+                    model_path=model_path,
+                    device=device,
+                    use_fp16=(dtype == mx.float16),
+                )
+                print("Text encoder loaded successfully!")
+            except Exception as e:
+                print(f"Warning: Could not load text encoder: {e}")
+                print("Using placeholder encoder (generation will have limited quality)")
 
         if load_audio_pipeline:
             print("Loading audio pipeline (DCAE + vocoder)...")
@@ -185,8 +202,13 @@ class ACEStep:
             mask = mx.ones((1, 64))
             return embeddings, mask
 
-        # TODO: Implement actual text encoding with UMT5
-        raise NotImplementedError("Text encoding not yet implemented")
+        # Encode using UMT5
+        embeddings, mask = self.text_encoder.encode(prompt)
+
+        # Cast to model dtype
+        embeddings = embeddings.astype(self.dtype)
+
+        return embeddings, mask
 
     def encode_lyrics(
         self,
