@@ -6,6 +6,7 @@ converting from PyTorch format to MLX format.
 """
 
 import json
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +14,58 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import snapshot_download
+from huggingface_hub.utils import LocalEntryNotFoundError, EntryNotFoundError
 from safetensors import safe_open
 from tqdm import tqdm
+
+
+class PathTraversalError(ValueError):
+    """Raised when a path traversal attempt is detected."""
+    pass
+
+
+def _validate_safe_path(base_dir: Path, filename: str) -> Path:
+    """
+    Validate that a filename doesn't escape the base directory.
+
+    Args:
+        base_dir: The trusted base directory
+        filename: The filename to validate (potentially untrusted)
+
+    Returns:
+        Safe resolved path within base_dir
+
+    Raises:
+        PathTraversalError: If the path would escape base_dir
+    """
+    # Normalize the base directory
+    base_dir = base_dir.resolve()
+
+    # Check for obvious path traversal attempts
+    if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+        raise PathTraversalError(
+            f"Invalid filename '{filename}': path traversal characters detected"
+        )
+
+    # Check for Windows drive letters
+    if len(filename) > 1 and filename[1] == ":":
+        raise PathTraversalError(
+            f"Invalid filename '{filename}': absolute Windows path not allowed"
+        )
+
+    # Construct and resolve the full path
+    full_path = (base_dir / filename).resolve()
+
+    # Verify the resolved path is within base_dir
+    try:
+        full_path.relative_to(base_dir)
+    except ValueError:
+        raise PathTraversalError(
+            f"Invalid filename '{filename}': resolved path escapes base directory"
+        )
+
+    return full_path
 
 
 @dataclass
@@ -105,25 +155,48 @@ def load_sharded_safetensors(
 
     Returns:
         Combined dictionary of all weights
+
+    Raises:
+        PathTraversalError: If index file contains invalid paths
+        json.JSONDecodeError: If index file is malformed
     """
-    directory = Path(directory)
+    directory = Path(directory).resolve()
 
     # Check for index file
     index_path = directory / "model.safetensors.index.json"
     if index_path.exists():
         with open(index_path) as f:
             index = json.load(f)
+
+        # Validate index structure
+        if not isinstance(index, dict):
+            raise ValueError("Invalid index file: expected a JSON object")
+
         weight_map = index.get("weight_map", {})
-        shard_files = set(weight_map.values())
+        if not isinstance(weight_map, dict):
+            raise ValueError("Invalid index file: weight_map must be a dict")
+
+        # Get unique shard files and validate each one
+        raw_shard_files = set(weight_map.values())
+        shard_files = []
+        for shard_filename in raw_shard_files:
+            if not isinstance(shard_filename, str):
+                raise ValueError(
+                    f"Invalid index file: shard filename must be string, got {type(shard_filename)}"
+                )
+            # Validate path is safe (no traversal)
+            safe_path = _validate_safe_path(directory, shard_filename)
+            shard_files.append(safe_path)
     else:
-        # Find all .safetensors files
+        # Find all .safetensors files directly in the directory
+        # (glob is safe - only returns files within the directory)
         shard_files = list(directory.glob("*.safetensors"))
 
     weights = {}
     iterator = tqdm(shard_files, desc="Loading weights") if show_progress else shard_files
 
-    for shard_file in iterator:
-        shard_path = directory / shard_file if isinstance(shard_file, str) else shard_file
+    for shard_path in iterator:
+        # shard_path is already a validated Path object
         shard_weights = load_safetensors(shard_path, dtype=dtype)
         weights.update(shard_weights)
 
@@ -160,11 +233,23 @@ def download_model(
     Returns:
         Path to the model directory
 
+    Raises:
+        FileNotFoundError: If local path doesn't exist or HF model not found
+        ValueError: If model_id is invalid
+
     Examples:
         >>> download_model("/path/to/local/model")  # Local path
         >>> download_model("ACE-Step/ACE-Step-v1-3.5B")  # HuggingFace repo
         >>> download_model("ACE-Step/ACE-Step-v1-3.5B", revision="v1.0")  # Specific version
     """
+    # Validate model_id
+    if not model_id or not isinstance(model_id, str):
+        raise ValueError(f"model_id must be a non-empty string, got {type(model_id)}")
+
+    model_id = model_id.strip()
+    if not model_id:
+        raise ValueError("model_id cannot be empty or whitespace")
+
     # Handle local paths directly
     if is_local_path(model_id):
         model_path = Path(model_id).expanduser().resolve()
@@ -184,8 +269,9 @@ def download_model(
             local_files_only=True,
         ))
         print("Using cached model.")
-    except Exception:
-        # Fall back to network download
+    except (LocalEntryNotFoundError, EntryNotFoundError, OSError):
+        # Model not cached locally, fall back to network download
+        # OSError can occur for network issues or missing cache
         model_path = Path(snapshot_download(
             model_id,
             local_dir=str(local_dir) if local_dir else None,

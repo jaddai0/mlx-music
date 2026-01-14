@@ -151,17 +151,32 @@ class ACEStep:
             try:
                 # Determine device for PyTorch encoder
                 import platform
-                if platform.system() == "Darwin":
-                    device = "mps" if hasattr(mx, "metal") else "cpu"
+                device = "cpu"  # Default to CPU
+                system = platform.system()
+
+                if system == "Darwin":
+                    # macOS: try MPS (Metal Performance Shaders) for PyTorch
+                    try:
+                        import torch
+                        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                            device = "mps"
+                    except ImportError:
+                        pass
                 else:
-                    device = "cuda" if mx.metal.is_available() else "cpu"
+                    # Linux/Windows: try CUDA for PyTorch
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            device = "cuda"
+                    except ImportError:
+                        pass
 
                 text_encoder = get_text_encoder(
                     model_path=model_path,
                     device=device,
                     use_fp16=(dtype == mx.float16),
                 )
-                print("Text encoder loaded successfully!")
+                print(f"Text encoder loaded successfully on {device}!")
             except Exception as e:
                 print(f"Warning: Could not load text encoder: {e}")
                 print("Using placeholder encoder (generation will have limited quality)")

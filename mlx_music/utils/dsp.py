@@ -6,6 +6,7 @@ to avoid redundant computation. Following mlx-audio patterns for efficiency.
 """
 
 import math
+import threading
 from functools import lru_cache
 from typing import Optional, Literal
 
@@ -31,6 +32,9 @@ __all__ = [
     "dsp_cache_info",
 ]
 
+# Epsilon for numerical stability (appropriate for float32/bfloat16)
+_EPSILON = 1e-8
+
 
 # =============================================================================
 # Cached Window Functions
@@ -43,12 +47,17 @@ def hanning(size: int, periodic: bool = False) -> mx.array:
     Hanning (Hann) window with caching.
 
     Args:
-        size: Window length
+        size: Window length (must be >= 1)
         periodic: If True, use periodic window (for spectral analysis)
 
     Returns:
         Hann window array
     """
+    if size < 1:
+        raise ValueError(f"Window size must be >= 1, got {size}")
+    if size == 1:
+        return mx.array([1.0], dtype=mx.float32)
+
     denom = size if periodic else size - 1
     return mx.array(
         [0.5 * (1 - math.cos(2 * math.pi * n / denom)) for n in range(size)],
@@ -62,12 +71,17 @@ def hamming(size: int, periodic: bool = False) -> mx.array:
     Hamming window with caching.
 
     Args:
-        size: Window length
+        size: Window length (must be >= 1)
         periodic: If True, use periodic window (for spectral analysis)
 
     Returns:
         Hamming window array
     """
+    if size < 1:
+        raise ValueError(f"Window size must be >= 1, got {size}")
+    if size == 1:
+        return mx.array([0.54], dtype=mx.float32)  # Hamming at n=0
+
     denom = size if periodic else size - 1
     return mx.array(
         [0.54 - 0.46 * math.cos(2 * math.pi * n / denom) for n in range(size)],
@@ -81,12 +95,17 @@ def blackman(size: int, periodic: bool = False) -> mx.array:
     Blackman window with caching.
 
     Args:
-        size: Window length
+        size: Window length (must be >= 1)
         periodic: If True, use periodic window (for spectral analysis)
 
     Returns:
         Blackman window array
     """
+    if size < 1:
+        raise ValueError(f"Window size must be >= 1, got {size}")
+    if size == 1:
+        return mx.array([0.42], dtype=mx.float32)  # Blackman at n=0
+
     denom = size if periodic else size - 1
     return mx.array(
         [
@@ -105,12 +124,17 @@ def bartlett(size: int, periodic: bool = False) -> mx.array:
     Bartlett (triangular) window with caching.
 
     Args:
-        size: Window length
+        size: Window length (must be >= 1)
         periodic: If True, use periodic window
 
     Returns:
         Bartlett window array
     """
+    if size < 1:
+        raise ValueError(f"Window size must be >= 1, got {size}")
+    if size == 1:
+        return mx.array([1.0], dtype=mx.float32)
+
     denom = size if periodic else size - 1
     return mx.array(
         [1 - 2 * abs(n - denom / 2) / denom for n in range(size)],
@@ -293,14 +317,14 @@ def mel_filterbank(
     f_diff = f_pts[1:] - f_pts[:-1]
     slopes = np.expand_dims(f_pts, 0) - np.expand_dims(all_freqs, 1)
 
-    # Calculate overlapping triangular filters
-    down_slopes = (-slopes[:, :-2]) / (f_diff[:-1] + 1e-10)
-    up_slopes = slopes[:, 2:] / (f_diff[1:] + 1e-10)
+    # Calculate overlapping triangular filters (use _EPSILON for numerical stability)
+    down_slopes = (-slopes[:, :-2]) / (f_diff[:-1] + _EPSILON)
+    up_slopes = slopes[:, 2:] / (f_diff[1:] + _EPSILON)
     filterbank = np.maximum(0.0, np.minimum(down_slopes, up_slopes))
 
     # Apply normalization
     if norm == "slaney":
-        enorm = 2.0 / (f_pts[2 : n_mels + 2] - f_pts[:n_mels] + 1e-10)
+        enorm = 2.0 / (f_pts[2 : n_mels + 2] - f_pts[:n_mels] + _EPSILON)
         filterbank *= np.expand_dims(enorm, 0)
 
     # Transpose to (n_mels, n_freqs)
@@ -316,15 +340,19 @@ def mel_filterbank(
 
 class ISTFTCache:
     """
-    Advanced caching for iSTFT operations.
+    Thread-safe caching for iSTFT operations.
 
     Caches normalization buffers and position indices for efficient
     vectorized overlap-add reconstruction.
+
+    Note: Uses structural keys (shape, n_fft, hop_length) rather than
+    content hashing to avoid hash collision issues.
     """
 
     def __init__(self):
         self.norm_buffer_cache = {}
         self.position_cache = {}
+        self._lock = threading.Lock()
 
     def get_positions(
         self,
@@ -335,14 +363,15 @@ class ISTFTCache:
         """Get cached position indices or create new ones."""
         key = (num_frames, frame_length, hop_length)
 
-        if key not in self.position_cache:
-            positions = (
-                mx.arange(num_frames)[:, None] * hop_length
-                + mx.arange(frame_length)[None, :]
-            )
-            self.position_cache[key] = positions.reshape(-1)
+        with self._lock:
+            if key not in self.position_cache:
+                positions = (
+                    mx.arange(num_frames)[:, None] * hop_length
+                    + mx.arange(frame_length)[None, :]
+                )
+                self.position_cache[key] = positions.reshape(-1)
 
-        return self.position_cache[key]
+            return self.position_cache[key]
 
     def get_norm_buffer(
         self,
@@ -351,40 +380,49 @@ class ISTFTCache:
         window: mx.array,
         num_frames: int,
     ) -> mx.array:
-        """Get cached normalization buffer or create new one."""
-        # Use window content hash for cache key
-        window_hash = hash(tuple(window.tolist()))
-        key = (n_fft, hop_length, window_hash, num_frames)
+        """Get cached normalization buffer or create new one.
 
-        if key not in self.norm_buffer_cache:
-            frame_length = window.shape[0]
-            ola_len = (num_frames - 1) * hop_length + frame_length
-            positions_flat = self.get_positions(num_frames, frame_length, hop_length)
+        Note: Uses structural key (n_fft, hop_length, window_shape, num_frames)
+        instead of content hash to avoid hash collisions. This means windows
+        with the same shape share cache entries - callers should reuse window
+        objects for best caching behavior.
+        """
+        # Use structural key to avoid hash collisions
+        window_shape = tuple(window.shape)
+        key = (n_fft, hop_length, window_shape, num_frames)
 
-            window_squared = window**2
-            norm_buffer = mx.zeros(ola_len, dtype=mx.float32)
-            window_sq_tiled = mx.tile(window_squared, (num_frames,))
-            norm_buffer = norm_buffer.at[positions_flat].add(window_sq_tiled)
-            norm_buffer = mx.maximum(norm_buffer, 1e-10)
+        with self._lock:
+            if key not in self.norm_buffer_cache:
+                frame_length = window.shape[0]
+                ola_len = (num_frames - 1) * hop_length + frame_length
+                positions_flat = self.get_positions(num_frames, frame_length, hop_length)
 
-            self.norm_buffer_cache[key] = norm_buffer
+                window_squared = window**2
+                norm_buffer = mx.zeros(ola_len, dtype=mx.float32)
+                window_sq_tiled = mx.tile(window_squared, (num_frames,))
+                norm_buffer = norm_buffer.at[positions_flat].add(window_sq_tiled)
+                norm_buffer = mx.maximum(norm_buffer, _EPSILON)
 
-        return self.norm_buffer_cache[key]
+                self.norm_buffer_cache[key] = norm_buffer
+
+            return self.norm_buffer_cache[key]
 
     def clear(self):
         """Clear all cached data to free memory."""
-        self.norm_buffer_cache.clear()
-        self.position_cache.clear()
+        with self._lock:
+            self.norm_buffer_cache.clear()
+            self.position_cache.clear()
 
     def info(self) -> dict:
         """Get information about cached items."""
-        return {
-            "norm_buffers": len(self.norm_buffer_cache),
-            "position_indices": len(self.position_cache),
-            "total_cached_items": (
-                len(self.norm_buffer_cache) + len(self.position_cache)
-            ),
-        }
+        with self._lock:
+            return {
+                "norm_buffers": len(self.norm_buffer_cache),
+                "position_indices": len(self.position_cache),
+                "total_cached_items": (
+                    len(self.norm_buffer_cache) + len(self.position_cache)
+                ),
+            }
 
 
 # Global ISTFT cache instance
