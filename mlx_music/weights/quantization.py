@@ -142,6 +142,9 @@ def quantize_model(
     if config.mode == QuantizationMode.NONE:
         return model
 
+    # Track if we've shown the Conv warning
+    conv_warning_shown = [False]
+
     # Create predicate for nn.quantize
     def class_predicate(path: str, module: nn.Module) -> Union[bool, dict]:
         """Determine if/how to quantize a module.
@@ -154,6 +157,15 @@ def quantize_model(
 
         # Only quantize Linear layers (Conv layers don't support quantization yet)
         if not isinstance(module, nn.Linear):
+            # Warn once about Conv layers being skipped
+            if isinstance(module, (nn.Conv1d, nn.Conv2d)) and not conv_warning_shown[0]:
+                import warnings
+                warnings.warn(
+                    "Conv layers (Conv1d, Conv2d) detected but not quantized. "
+                    "MLX native quantization currently only supports Linear layers. "
+                    "Memory savings may be less than expected."
+                )
+                conv_warning_shown[0] = True
             return False
 
         layer_bits = _get_bits_for_layer(path, config)

@@ -99,7 +99,7 @@ class WeightNormConv1d(nn.Module):
     def _compute_weight(self) -> mx.array:
         """Compute normalized weight from weight_g and weight_v."""
         # Normalize weight_v over the kernel and input dimensions
-        norm = mx.sqrt(mx.sum(self.weight_v ** 2, axis=(1, 2), keepdims=True) + 1e-8)
+        norm = mx.sqrt(mx.sum(self.weight_v ** 2, axis=(1, 2), keepdims=True) + 1e-5)  # Use 1e-5 for bfloat16 numerical stability
         return self.weight_g * self.weight_v / norm
 
     def __call__(self, x: mx.array) -> mx.array:
@@ -146,8 +146,9 @@ class WeightNormConvTranspose1d(nn.Module):
         # MLX format: (out_channels, kernel_size, in_channels_per_group)
         in_per_group = in_channels // groups
         self.weight_v = mx.random.normal(shape=(out_channels, kernel_size, in_per_group)) * 0.02
-        # weight_g: (out_channels, 1, 1) for normalization
-        self.weight_g = mx.ones((out_channels, 1, 1))
+        # weight_g: (1, 1, in_channels) for per-input-channel normalization
+        # PyTorch ConvTranspose normalizes over (out, kernel) dims, scaling per input channel
+        self.weight_g = mx.ones((1, 1, in_per_group))
 
         if bias:
             self.bias = mx.zeros((out_channels,))
@@ -155,8 +156,13 @@ class WeightNormConvTranspose1d(nn.Module):
             self.bias = None
 
     def _compute_weight(self) -> mx.array:
-        """Compute normalized weight from weight_g and weight_v."""
-        norm = mx.sqrt(mx.sum(self.weight_v ** 2, axis=(1, 2), keepdims=True) + 1e-8)
+        """Compute normalized weight from weight_g and weight_v.
+
+        For ConvTranspose with weight shape (out, kernel, in):
+        - Norm is computed over (out, kernel) axes -> shape (1, 1, in)
+        - weight_g scales per input channel -> shape (1, 1, in)
+        """
+        norm = mx.sqrt(mx.sum(self.weight_v ** 2, axis=(0, 1), keepdims=True) + 1e-5)
         return self.weight_g * self.weight_v / norm
 
     def __call__(self, x: mx.array) -> mx.array:
@@ -170,6 +176,11 @@ class WeightNormConvTranspose1d(nn.Module):
             padding=self.padding,
             groups=self.groups,
         )
+
+        # Apply output_padding manually (MLX doesn't have native support yet)
+        # Output padding adds extra elements to one side of the output
+        if self.output_padding > 0:
+            y = mx.pad(y, [(0, 0), (0, self.output_padding), (0, 0)])
 
         if self.bias is not None:
             y = y + self.bias
@@ -293,6 +304,8 @@ class ConvNeXtBackbone(nn.Module):
         # Stage 0
         for j in range(self.config.depths[0]):
             x = self.stages["0"][str(j)](x)
+        # Evaluate after stage to prevent graph explosion
+        mx.eval(x)
 
         # Stages 1-3 with channel transitions
         for i in range(1, 4):
@@ -303,6 +316,8 @@ class ConvNeXtBackbone(nn.Module):
             # Blocks
             for j in range(self.config.depths[i]):
                 x = self.stages[str(i)][str(j)](x)
+            # Evaluate after each stage to prevent graph explosion
+            mx.eval(x)
 
         x = self.norm(x)
         return x
@@ -564,27 +579,19 @@ class HiFiGANVocoder(nn.Module):
                 else:
                     processed[key] = value
 
-            # Process ConvTranspose weights - compute normalized weight
+            # Process ConvTranspose weights - handle weight normalization correctly
+            # PyTorch ConvTranspose: weight (in, out, k), weight_g (in, 1, 1)
+            # MLX format after transpose: weight_v (out, k, in), weight_g needs (1, 1, in)
             for layer_idx, layer_weights in ups_weights.items():
                 if "weight_g" in layer_weights and "weight_v" in layer_weights:
                     weight_v = layer_weights["weight_v"]  # Already transposed: (out, kernel, in)
-                    weight_g = layer_weights["weight_g"]  # Still: (in, 1, 1)
+                    weight_g = layer_weights["weight_g"]  # PyTorch format: (in, 1, 1)
 
-                    # Compute norm over (kernel, in) dims in MLX format
-                    norm = mx.sqrt(mx.sum(weight_v ** 2, axis=(1, 2), keepdims=True) + 1e-8)
-                    # weight_g is applied per input channel in PyTorch, need to reshape
-                    # Since out != in for upsampling, we compute the effective weight
-                    # Just use the weight_v normalized, scaled by average weight_g
-                    scale = mx.mean(weight_g)
-                    effective_weight_v = weight_v * scale / norm * mx.sqrt(
-                        mx.array(weight_v.shape[1] * weight_v.shape[2], dtype=dtype)
-                    )
+                    # Transpose weight_g to match MLX format: (in, 1, 1) -> (1, 1, in)
+                    weight_g_mlx = mx.transpose(weight_g, axes=(1, 2, 0))
 
-                    processed[f"head.ups.{layer_idx}.weight_v"] = effective_weight_v
-                    # Set weight_g to 1s so runtime normalization is identity
-                    processed[f"head.ups.{layer_idx}.weight_g"] = mx.ones(
-                        (weight_v.shape[0], 1, 1), dtype=dtype
-                    )
+                    processed[f"head.ups.{layer_idx}.weight_v"] = weight_v
+                    processed[f"head.ups.{layer_idx}.weight_g"] = weight_g_mlx
 
                 if "bias" in layer_weights:
                     processed[f"head.ups.{layer_idx}.bias"] = layer_weights["bias"]

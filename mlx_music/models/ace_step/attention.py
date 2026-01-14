@@ -125,14 +125,17 @@ def apply_rotary_emb(
     cos = cos[None, None, :, :]
     sin = sin[None, None, :, :]
 
-    # Split into real and imaginary parts for rotation
-    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2)[..., 0], x.reshape(*x.shape[:-1], -1, 2)[..., 1]
+    # Split into real and imaginary parts for rotation (single reshape for efficiency)
+    x_reshaped = x.reshape(*x.shape[:-1], -1, 2)
+    x_real, x_imag = x_reshaped[..., 0], x_reshaped[..., 1]
 
     # Create rotated version: [-x_imag, x_real] interleaved
     x_rotated = mx.stack([-x_imag, x_real], axis=-1).reshape(x.shape)
 
-    # Apply rotation
-    out = x.astype(mx.float32) * cos + x_rotated.astype(mx.float32) * sin
+    # Apply rotation (compute in float32 for numerical stability)
+    cos_f32 = cos.astype(mx.float32)
+    sin_f32 = sin.astype(mx.float32)
+    out = x.astype(mx.float32) * cos_f32 + x_rotated.astype(mx.float32) * sin_f32
     return out.astype(x.dtype)
 
 
@@ -337,7 +340,7 @@ class LiteLAAttention(nn.Module):
         self.heads = heads
         self.dim_head = dim_head
         self.inner_dim = heads * dim_head
-        self.eps = 1e-15
+        self.eps = 1e-6  # Increased from 1e-15 for bfloat16 numerical stability
         self.pad_val = 1.0
 
         # Projections
@@ -549,8 +552,8 @@ class SDPACrossAttention(nn.Module):
         if attention_mask is not None and encoder_attention_mask is not None:
             # Combined mask: (batch, seq_q, seq_kv)
             combined = attention_mask[:, :, None] * encoder_attention_mask[:, None, :]
-            # Convert to additive mask
-            attn_mask = mx.where(combined == 1, mx.zeros_like(combined), mx.array(-1e9))
+            # Convert to additive mask (use -1e4 for float16 compatibility, -65504 is float16 min)
+            attn_mask = mx.where(combined == 1, mx.zeros_like(combined), mx.array(-1e4))
             # Expand for heads: (batch, 1, seq_q, seq_kv) -> (batch, heads, seq_q, seq_kv)
             attn_mask = attn_mask[:, None, :, :].astype(query.dtype)
 

@@ -6,6 +6,7 @@ converting from PyTorch format to MLX format.
 """
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -62,7 +63,6 @@ def load_safetensors(
         raise  # Re-raise file not found errors
     except (RuntimeError, ValueError) as e:
         # MLX load failed (possibly format issue), fall back to safetensors
-        import warnings
         warnings.warn(f"MLX native load failed for {path}, falling back to safetensors: {e}")
 
     # Fallback to safetensors with numpy (doesn't support bfloat16)
@@ -80,7 +80,10 @@ def load_safetensors(
             except TypeError as e:
                 if "bfloat16" in str(e):
                     # Skip bfloat16 tensors when using numpy framework
-                    print(f"Warning: Skipping bfloat16 tensor {key}")
+                    warnings.warn(
+                        f"Skipping bfloat16 tensor '{key}' - numpy fallback doesn't support bfloat16. "
+                        f"Some model weights may be missing."
+                    )
                 else:
                     raise
 
@@ -425,6 +428,13 @@ def load_ace_step_weights(
     else:
         # Try sharded loading
         weights = load_sharded_safetensors(component_dir, dtype=dtype)
+
+    # Validate that weights were loaded
+    if not weights:
+        raise ValueError(
+            f"No weights loaded from {component_dir}. "
+            f"Expected safetensors files but found none or all were empty."
+        )
 
     # Apply transformations for transformer component
     if component == "transformer":

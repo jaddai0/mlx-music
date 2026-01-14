@@ -266,7 +266,21 @@ def main():
                        help="Skip text encoder (for testing without transformers)")
     args = parser.parse_args()
 
+    # Validate arguments
+    if args.steps <= 0:
+        parser.error("--steps must be a positive integer")
+
     model_path = Path(args.model_path)
+    if not model_path.exists():
+        parser.error(f"Model path does not exist: {model_path}")
+
+    if args.cfg_scale > 15.0:
+        import warnings
+        warnings.warn(
+            f"CFG scale {args.cfg_scale} is very high and may cause numerical instability "
+            f"(NaN/Inf) with bfloat16 precision. Consider using a value <= 15.0"
+        )
+
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

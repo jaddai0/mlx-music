@@ -558,10 +558,18 @@ class ACEStepTransformer(nn.Module):
         batch_size = hidden_states.shape[0]
         output_length = hidden_states.shape[-1]
 
+        # Validate input dimensions are divisible by patch_size
+        h, w = hidden_states.shape[2], hidden_states.shape[3]
+        ph, pw = self.config.patch_size
+        if h % ph != 0 or w % pw != 0:
+            raise ValueError(
+                f"Input dimensions ({h}, {w}) must be divisible by patch_size ({ph}, {pw}). "
+                f"Got remainders ({h % ph}, {w % pw})."
+            )
+
         # Default masks
         if attention_mask is None:
-            seq_len = (hidden_states.shape[2] // self.config.patch_size[0]) * \
-                      (hidden_states.shape[3] // self.config.patch_size[1])
+            seq_len = (h // ph) * (w // pw)
             attention_mask = mx.ones((batch_size, seq_len))
 
         if text_attention_mask is None and encoder_text_hidden_states is not None:
