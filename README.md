@@ -4,25 +4,17 @@ The first MLX-native music generation library for Apple Silicon.
 
 Generate music from text descriptions and lyrics, optimized for M1/M2/M3/M4 Macs.
 
-## Status: Early Development
+## Status: Active Development
 
-This library is under active development. Currently implementing:
-- [x] Core transformer architecture
-- [x] Linear attention with RoPE
-- [x] Flow matching scheduler
-- [x] Weight loading from SafeTensors
-- [x] Basic quantization support
-- [ ] DCAE (audio encoder/decoder)
-- [ ] HiFi-GAN vocoder
-- [ ] UMT5 text encoder
-- [ ] End-to-end generation
-- [ ] Voice cloning support
+This library is under active development with three model families supported.
 
 ## Supported Models
 
-| Model | Status | Description |
-|-------|--------|-------------|
-| ACE-Step | In Progress | 3.5B param diffusion model for lyrics-to-music |
+| Model | Status | Parameters | Description |
+|-------|--------|------------|-------------|
+| ACE-Step | ✅ Supported | 3.5B | Diffusion model for lyrics-to-music generation |
+| MusicGen | ✅ Supported | 300M-3.3B | Autoregressive LM for text-to-music (mono/stereo) |
+| Stable Audio | ✅ Supported | 1.2B | DiT-based diffusion for high-quality audio (44.1kHz stereo) |
 
 ## Installation
 
@@ -35,22 +27,46 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
+### ACE-Step (Lyrics-to-Music)
 ```python
 from mlx_music import ACEStep
 
-# Load model
 model = ACEStep.from_pretrained("ACE-Step/ACE-Step-v1-3.5B")
-
-# Generate music
 output = model.generate(
-    prompt="upbeat electronic dance music with heavy bass",
+    prompt="upbeat electronic dance music",
     lyrics="Verse 1: Dancing through the night...",
     duration=30.0,
-    num_inference_steps=60,
-    guidance_scale=15.0,
 )
 
-# Save audio
+import soundfile as sf
+sf.write("output.wav", output.audio.T, output.sample_rate)
+```
+
+### MusicGen (Text-to-Music)
+```python
+from mlx_music import MusicGen
+
+model = MusicGen.from_pretrained("facebook/musicgen-stereo-medium")
+output = model.generate(
+    prompt="jazz piano with drums",
+    duration=10.0,
+)
+
+import soundfile as sf
+sf.write("output.wav", output.audio.T, output.sample_rate)
+```
+
+### Stable Audio (High-Quality Audio)
+```python
+from mlx_music import StableAudio
+
+model = StableAudio.from_pretrained("stabilityai/stable-audio-open-1.0")
+output = model.generate(
+    prompt="ambient electronic music with soft pads",
+    duration=30.0,
+    guidance_scale=7.0,
+)
+
 import soundfile as sf
 sf.write("output.wav", output.audio.T, output.sample_rate)
 ```
@@ -74,23 +90,25 @@ mlx-music generate \
 
 ## Architecture
 
-MLX Music implements the ACE-Step architecture:
+MLX Music implements three model architectures:
 
-```
-ACE-Step (3.5B parameters)
-├── Linear Transformer (24 blocks, 2560 dim)
-│   ├── Linear attention with ReLU kernel (O(n) complexity)
-│   ├── Rotary Position Embeddings (RoPE)
-│   ├── Cross-attention for text/lyric conditioning
-│   └── AdaLN-single timestep conditioning
-├── DCAE (Deep Compression AutoEncoder)
-│   ├── Encoder: Audio → Latent space
-│   └── Decoder: Latent → Mel-spectrogram
-├── HiFi-GAN Vocoder
-│   └── Mel-spectrogram → Audio waveform
-└── UMT5 Text Encoder
-    └── Text → Embeddings
-```
+### ACE-Step (3.5B params)
+- **Linear Transformer**: 24 blocks with linear attention (O(n) complexity)
+- **DCAE**: Audio encoder/decoder with 8x compression
+- **HiFi-GAN Vocoder**: Mel-spectrogram to waveform
+- **UMT5 Text Encoder**: Text and lyrics conditioning
+
+### MusicGen (300M-3.3B params)
+- **Autoregressive LM**: Decoder-only transformer
+- **EnCodec**: Neural audio codec (mono/stereo)
+- **T5 Text Encoder**: Text conditioning
+- **Delay Pattern**: Efficient multi-codebook generation
+
+### Stable Audio (1.2B params)
+- **DiT Transformer**: 24-layer diffusion transformer with GQA
+- **AutoencoderOobleck**: 2048x compression VAE with Snake activation
+- **T5 Text Encoder**: Text conditioning
+- **EDM Scheduler**: DPM-Solver++ with Karras sigmas
 
 ## Quantization
 

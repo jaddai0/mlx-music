@@ -1103,6 +1103,91 @@ def load_weights_with_string_keys(
         raise KeyError(f"Missing {len(missing)} weights: {missing[:10]}...")
 
 
+# Stable Audio specific weight mappings
+# The transformer uses standard Linear layers (no transposition needed)
+# The VAE uses Conv1d layers that need transposition
+
+def generate_stable_audio_vae_mappings() -> List[WeightMapping]:
+    """Generate weight mappings for Stable Audio VAE (AutoencoderOobleck).
+
+    The VAE uses 1D convolutions throughout for audio processing.
+    Conv1d weights need transposition from PyTorch format.
+    """
+    mappings = []
+
+    # Encoder and decoder use similar patterns with conv1d
+    # All conv1d weights need transposition
+
+    return mappings  # Most weights pass through, conv1d handled dynamically
+
+
+def load_stable_audio_weights(
+    model_path: Union[str, Path],
+    component: str = "transformer",
+    dtype: mx.Dtype = mx.float32,
+) -> Dict[str, mx.array]:
+    """
+    Load Stable Audio model weights.
+
+    Args:
+        model_path: Path to model directory or HuggingFace repo ID
+        component: Which component to load ("transformer", "vae", "projection_model", "text_encoder")
+        dtype: Target dtype for weights
+
+    Returns:
+        Dictionary of weights
+    """
+    model_path = Path(model_path)
+
+    # Map component to subdirectory (HuggingFace diffusers format)
+    component_dirs = {
+        "transformer": "transformer",
+        "vae": "vae",
+        "projection_model": "projection_model",
+        "text_encoder": "text_encoder",
+    }
+
+    if component not in component_dirs:
+        raise ValueError(f"Unknown component: {component}. Choose from {list(component_dirs.keys())}")
+
+    component_dir = model_path / component_dirs[component]
+
+    if not component_dir.exists():
+        raise FileNotFoundError(f"Component directory not found: {component_dir}")
+
+    # Load weights
+    weight_file = component_dir / "diffusion_pytorch_model.safetensors"
+    if not weight_file.exists():
+        weight_file = component_dir / "model.safetensors"
+
+    if weight_file.exists():
+        weights = load_safetensors(weight_file, dtype=dtype)
+    else:
+        # Try sharded loading
+        weights = load_sharded_safetensors(component_dir, dtype=dtype)
+
+    # Validate that weights were loaded
+    if not weights:
+        raise ValueError(
+            f"No weights loaded from {component_dir}. "
+            f"Expected safetensors files but found none or all were empty."
+        )
+
+    # Apply Conv1d transposition for VAE weights
+    if component == "vae":
+        transposed_weights = {}
+        for key, value in weights.items():
+            # Conv1d weights have shape (out, in, kernel) in PyTorch
+            # Need to transpose to (out, kernel, in) for MLX
+            if "conv" in key.lower() and "weight" in key and value.ndim == 3:
+                transposed_weights[key] = transpose_conv1d(value)
+            else:
+                transposed_weights[key] = value
+        weights = transposed_weights
+
+    return weights
+
+
 def load_ace_step_weights(
     model_path: Union[str, Path],
     component: str = "transformer",
