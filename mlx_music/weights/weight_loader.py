@@ -202,6 +202,23 @@ def load_safetensors(
     return weights
 
 
+def load_single_safetensors(
+    path: Union[str, Path],
+    dtype: mx.Dtype = mx.bfloat16,
+) -> Dict[str, mx.array]:
+    """
+    Load weights from a single SafeTensors file.
+
+    Args:
+        path: Path to the .safetensors file
+        dtype: Target dtype for weights
+
+    Returns:
+        Dictionary mapping weight names to MLX arrays
+    """
+    return load_safetensors(path, dtype=dtype)
+
+
 def load_sharded_safetensors(
     directory: Union[str, Path],
     dtype: mx.Dtype = mx.bfloat16,
