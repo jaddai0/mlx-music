@@ -154,6 +154,8 @@ class MusicGen:
             melody_conditioner = MelodyConditioner(
                 sample_rate=config.sampling_rate,
                 num_chroma=config.num_chroma,
+                hidden_size=config.hidden_size,
+                frame_rate=config.frame_rate,
             )
             print("Melody conditioner initialized")
 
@@ -228,36 +230,115 @@ class MusicGen:
         prompt: str,
         melody_audio: mx.array,
         duration: float = 10.0,
-        **kwargs,
+        temperature: float = 1.0,
+        top_k: int = 250,
+        top_p: float = 0.0,
+        guidance_scale: float = 3.0,
+        seed: Optional[int] = None,
+        callback: Optional[Callable[[int, int, mx.array], None]] = None,
+        return_codes: bool = False,
     ) -> GenerationOutput:
         """
         Generate music with melody conditioning.
 
-        Only available for MusicGen-Melody variant.
+        Only available for MusicGen-Melody variant. The melody from the reference
+        audio guides the generation while the text prompt controls style/instrumentation.
 
         Args:
-            prompt: Text description
-            melody_audio: Reference audio for melody extraction
-            duration: Target duration
-            **kwargs: Additional generation parameters
+            prompt: Text description of desired style/instrumentation
+            melody_audio: Reference audio for melody extraction (samples,) or (channels, samples)
+            duration: Target duration in seconds
+            temperature: Sampling temperature (higher = more random)
+            top_k: Top-k filtering (higher = more diverse)
+            top_p: Nucleus sampling threshold (0.0 = disabled)
+            guidance_scale: Classifier-free guidance scale
+            seed: Random seed for reproducibility
+            callback: Optional progress callback(step, total_steps, codes)
+            return_codes: Whether to return raw audio codes
 
         Returns:
-            GenerationOutput with audio
+            GenerationOutput with melody-conditioned audio
         """
         if not self.config.is_melody:
             raise RuntimeError(
-                "Melody conditioning only available for MusicGen-Melody variant"
+                "Melody conditioning only available for MusicGen-Melody variant. "
+                "Load a melody model like 'facebook/musicgen-melody'"
             )
 
         if self.melody_conditioner is None:
             raise RuntimeError("Melody conditioner not initialized")
 
-        # Extract chroma from melody audio
-        chroma = self.melody_conditioner.extract_chroma(melody_audio)
+        if self.text_encoder is None:
+            raise RuntimeError("Text encoder not loaded. Load with load_text_encoder=True")
 
-        # TODO: Integrate chroma into generation
-        raise NotImplementedError(
-            "Melody-conditioned generation not yet fully implemented"
+        if self.encodec is None:
+            raise RuntimeError("EnCodec not loaded. Load with load_encodec=True")
+
+        return self.generator.generate_with_melody(
+            prompt=prompt,
+            melody_audio=melody_audio,
+            melody_conditioner=self.melody_conditioner,
+            duration=duration,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            callback=callback,
+            return_codes=return_codes,
+        )
+
+    def generate_continuation(
+        self,
+        audio: mx.array,
+        prompt: str,
+        duration: float = 10.0,
+        temperature: float = 1.0,
+        top_k: int = 250,
+        top_p: float = 0.0,
+        guidance_scale: float = 3.0,
+        seed: Optional[int] = None,
+        callback: Optional[Callable[[int, int, mx.array], None]] = None,
+        return_codes: bool = False,
+    ) -> GenerationOutput:
+        """
+        Continue generation from existing audio.
+
+        Encodes the existing audio and continues generating in the same style,
+        guided by the text prompt.
+
+        Args:
+            audio: Existing audio to continue from (samples,) or (channels, samples)
+            prompt: Text prompt for continuation style
+            duration: Additional duration to generate in seconds
+            temperature: Sampling temperature (higher = more random)
+            top_k: Top-k filtering (higher = more diverse)
+            top_p: Nucleus sampling threshold (0.0 = disabled)
+            guidance_scale: Classifier-free guidance scale
+            seed: Random seed for reproducibility
+            callback: Optional progress callback(step, total_steps, codes)
+            return_codes: Whether to return raw audio codes
+
+        Returns:
+            GenerationOutput with continuation (original + generated audio)
+        """
+        if self.text_encoder is None:
+            raise RuntimeError("Text encoder not loaded. Load with load_text_encoder=True")
+
+        if self.encodec is None:
+            raise RuntimeError("EnCodec not loaded. Load with load_encodec=True")
+
+        return self.generator.generate_continuation(
+            audio=audio,
+            prompt=prompt,
+            duration=duration,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            callback=callback,
+            return_codes=return_codes,
         )
 
     def __repr__(self) -> str:

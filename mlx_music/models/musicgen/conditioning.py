@@ -7,6 +7,7 @@ Text encoder and optional melody conditioning for MusicGen models.
 from typing import Optional, Tuple
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 
 
@@ -221,7 +222,8 @@ class MelodyConditioner:
     """
     Melody conditioning for MusicGen-Melody variant.
 
-    Extracts chroma features from reference audio for melody guidance.
+    Extracts chroma features from reference audio and projects them
+    to embeddings for conditioning the generation.
     """
 
     def __init__(
@@ -229,6 +231,8 @@ class MelodyConditioner:
         sample_rate: int = 32000,
         num_chroma: int = 12,
         hop_length: int = 4096,
+        hidden_size: int = 1536,
+        frame_rate: int = 50,
     ):
         """
         Initialize melody conditioner.
@@ -237,10 +241,17 @@ class MelodyConditioner:
             sample_rate: Audio sample rate
             num_chroma: Number of chroma bins (typically 12 for semitones)
             hop_length: Hop length for chroma extraction
+            hidden_size: Target embedding dimension for decoder
+            frame_rate: Target frame rate for resampling chroma
         """
         self.sample_rate = sample_rate
         self.num_chroma = num_chroma
         self.hop_length = hop_length
+        self.hidden_size = hidden_size
+        self.frame_rate = frame_rate
+
+        # Chroma projection layer (num_chroma -> hidden_size)
+        self.chroma_proj = nn.Linear(num_chroma, hidden_size)
 
     def extract_chroma(
         self,
@@ -253,7 +264,7 @@ class MelodyConditioner:
             audio: Audio waveform (samples,) or (channels, samples)
 
         Returns:
-            chroma: (num_frames, num_chroma) chroma features
+            chroma: (num_frames, num_chroma) chroma features, always at least 1 frame
         """
         # Convert to numpy for librosa
         audio_np = np.array(audio)
@@ -261,6 +272,11 @@ class MelodyConditioner:
         # Handle multi-channel by taking mean
         if audio_np.ndim > 1:
             audio_np = audio_np.mean(axis=0)
+
+        # Validate audio has samples
+        if len(audio_np) == 0:
+            # Return single zero frame for empty audio
+            return mx.zeros((1, self.num_chroma), dtype=mx.float32)
 
         try:
             import librosa
@@ -274,12 +290,61 @@ class MelodyConditioner:
             # Transpose to (num_frames, num_chroma)
             chroma = chroma.T
 
+            # Handle edge case: librosa returns empty array for very short audio
+            if chroma.shape[0] == 0:
+                chroma = np.zeros((1, self.num_chroma), dtype=np.float32)
+
         except ImportError:
             # Fallback: return placeholder
-            num_frames = len(audio_np) // self.hop_length
+            num_frames = max(1, len(audio_np) // self.hop_length)
             chroma = np.zeros((num_frames, self.num_chroma), dtype=np.float32)
 
         return mx.array(chroma, dtype=mx.float32)
+
+    def get_chroma_embeddings(
+        self,
+        audio: mx.array,
+        target_length: int,
+    ) -> mx.array:
+        """
+        Extract chroma and project to embeddings, resampled to target length.
+
+        Args:
+            audio: Audio waveform (samples,) or (channels, samples)
+            target_length: Target number of frames to generate
+
+        Returns:
+            chroma_embeddings: (1, target_length, hidden_size) embeddings
+        """
+        # Handle edge case: target_length <= 0
+        if target_length <= 0:
+            return mx.zeros((1, 0, self.hidden_size), dtype=mx.float32)
+
+        # Extract raw chroma features
+        chroma = self.extract_chroma(audio)  # (num_frames, num_chroma)
+
+        # Resample chroma to target length using linear interpolation
+        num_frames = chroma.shape[0]
+        if num_frames != target_length:
+            # Convert to numpy for interpolation
+            chroma_np = np.array(chroma)
+            indices = np.linspace(0, num_frames - 1, target_length)
+            indices_floor = np.floor(indices).astype(int)
+            indices_ceil = np.minimum(indices_floor + 1, num_frames - 1)
+            weights = indices - indices_floor
+
+            # Linear interpolation
+            chroma_resampled = (
+                chroma_np[indices_floor] * (1 - weights[:, None])
+                + chroma_np[indices_ceil] * weights[:, None]
+            )
+            chroma = mx.array(chroma_resampled, dtype=mx.float32)
+
+        # Project to hidden size: (target_length, num_chroma) -> (target_length, hidden_size)
+        chroma_embeddings = self.chroma_proj(chroma)
+
+        # Add batch dimension
+        return chroma_embeddings[None, :, :]  # (1, target_length, hidden_size)
 
 
 def get_text_encoder(

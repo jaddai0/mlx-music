@@ -365,27 +365,394 @@ class MusicGenGenerator:
         audio: mx.array,
         prompt: str,
         duration: float = 10.0,
-        **kwargs,
+        temperature: float = 1.0,
+        top_k: int = 250,
+        top_p: float = 0.0,
+        guidance_scale: float = 3.0,
+        seed: Optional[int] = None,
+        callback: Optional[Callable[[int, int, mx.array], None]] = None,
+        return_codes: bool = False,
     ) -> GenerationOutput:
         """
         Continue generation from existing audio.
 
         Args:
-            audio: Existing audio to continue from
-            prompt: Text prompt for continuation
-            duration: Additional duration to generate
-            **kwargs: Additional generation parameters
+            audio: Existing audio to continue from (channels, samples) or (samples,)
+            prompt: Text prompt for continuation style
+            duration: Additional duration to generate in seconds
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            guidance_scale: Classifier-free guidance scale
+            seed: Random seed for reproducibility
+            callback: Optional progress callback
+            return_codes: Whether to return raw audio codes
 
         Returns:
-            GenerationOutput with continued audio
+            GenerationOutput with continuation (original + generated audio)
         """
+        # Validate inputs
+        if duration <= 0:
+            raise ValueError(f"duration must be positive, got {duration}")
+        max_duration = 30.0
+        if duration > max_duration:
+            raise ValueError(f"duration must be <= {max_duration} seconds, got {duration}")
+
+        if seed is not None:
+            mx.random.seed(seed)
+
+        # Ensure audio has correct shape for encoding: (batch, channels, samples)
+        if audio.ndim == 1:
+            audio = audio[None, None, :]  # (1, 1, samples)
+        elif audio.ndim == 2:
+            audio = audio[None, :, :]  # (1, channels, samples)
+
         # Encode existing audio to codes
-        existing_codes, _ = self.encodec.encode(audio)
+        existing_codes, _ = self.encodec.encode(audio)  # (batch, num_codebooks, num_frames)
 
-        # Continue generation from those codes
-        # ... (implementation would continue the generation loop)
+        # Calculate target length for new generation
+        frame_rate = self.config.frame_rate
+        target_new_length = max(1, int(duration * frame_rate))
 
-        raise NotImplementedError("Continuation generation not yet implemented")
+        # Validate total duration (existing + new) doesn't exceed limit
+        existing_frames = existing_codes.shape[-1]
+        existing_duration = existing_frames / frame_rate
+        total_duration_estimate = existing_duration + duration
+        if total_duration_estimate > max_duration:
+            raise ValueError(
+                f"Total duration ({existing_duration:.1f}s existing + {duration:.1f}s new = "
+                f"{total_duration_estimate:.1f}s) exceeds max {max_duration}s. "
+                f"Use shorter existing audio or request less new duration."
+            )
+
+        # Encode text prompt
+        encoder_hidden_states, encoder_attention_mask = self.text_encoder.encode(prompt)
+
+        # For CFG, also need unconditional encoding
+        if guidance_scale > 1.0:
+            uncond_hidden_states, uncond_mask = self.text_encoder.encode("")
+
+        # Prepend BOS token to existing codes
+        batch_size = 1
+        num_codebooks = self.config.decoder.num_codebooks
+        bos_token = self.config.decoder.bos_token_id
+        bos_tokens = mx.full((batch_size, num_codebooks, 1), bos_token, dtype=mx.int32)
+
+        # Combine: BOS + existing codes
+        codes = mx.concatenate([bos_tokens, existing_codes], axis=-1)
+
+        # Evaluate codes to prevent memory buildup from encodec computation graph
+        mx.eval(codes)
+
+        # KV caches - need to process existing sequence first
+        past_key_values = None
+        cross_attn_past_key_values = None
+        uncond_past_key_values = None
+        uncond_cross_attn_past_key_values = None
+
+        # First pass: process existing codes to build KV cache
+        _, past_key_values, cross_attn_past_key_values = self.decoder(
+            input_ids=codes,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_values=None,
+            cross_attn_past_key_values=None,
+            use_cache=True,
+        )
+
+        if guidance_scale > 1.0:
+            _, uncond_past_key_values, uncond_cross_attn_past_key_values = self.decoder(
+                input_ids=codes,
+                encoder_hidden_states=uncond_hidden_states,
+                encoder_attention_mask=uncond_mask,
+                past_key_values=None,
+                cross_attn_past_key_values=None,
+                use_cache=True,
+            )
+
+        # Evaluate KV caches from first pass to prevent memory buildup
+        to_eval = []
+        if past_key_values is not None:
+            for kv in past_key_values:
+                if kv is not None:
+                    to_eval.extend(x for x in kv if x is not None)
+        if cross_attn_past_key_values is not None:
+            for kv in cross_attn_past_key_values:
+                if kv is not None:
+                    to_eval.extend(x for x in kv if x is not None)
+        if uncond_past_key_values is not None:
+            for kv in uncond_past_key_values:
+                if kv is not None:
+                    to_eval.extend(x for x in kv if x is not None)
+        if uncond_cross_attn_past_key_values is not None:
+            for kv in uncond_cross_attn_past_key_values:
+                if kv is not None:
+                    to_eval.extend(x for x in kv if x is not None)
+        if to_eval:
+            mx.eval(*to_eval)
+
+        # Generation loop for new tokens
+        for step in range(target_new_length):
+            # Get logits from decoder (conditional)
+            logits, past_key_values, cross_attn_past_key_values = self.decoder(
+                input_ids=codes[:, :, -1:],
+                encoder_hidden_states=None,  # Use cached
+                encoder_attention_mask=encoder_attention_mask,
+                past_key_values=past_key_values,
+                cross_attn_past_key_values=cross_attn_past_key_values,
+                use_cache=True,
+            )
+
+            next_logits = logits[:, :, -1, :]
+
+            # Apply CFG
+            if guidance_scale > 1.0:
+                uncond_logits, uncond_past_key_values, uncond_cross_attn_past_key_values = self.decoder(
+                    input_ids=codes[:, :, -1:],
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=uncond_mask,
+                    past_key_values=uncond_past_key_values,
+                    cross_attn_past_key_values=uncond_cross_attn_past_key_values,
+                    use_cache=True,
+                )
+                uncond_next = uncond_logits[:, :, -1, :]
+                next_logits = apply_classifier_free_guidance(
+                    next_logits, uncond_next, guidance_scale
+                )
+
+            # Sample next tokens
+            next_tokens = []
+            for cb in range(num_codebooks):
+                cb_logits = next_logits[:, cb, :]
+                next_token = sample_next_token(cb_logits, temperature, top_k, top_p)
+                next_tokens.append(next_token)
+
+            next_tokens = mx.stack(next_tokens, axis=1)
+            codes = mx.concatenate([codes, next_tokens], axis=-1)
+
+            # Evaluate to prevent memory buildup
+            to_eval = [codes]
+            if past_key_values is not None:
+                for kv in past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            if cross_attn_past_key_values is not None:
+                for kv in cross_attn_past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            if uncond_past_key_values is not None:
+                for kv in uncond_past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            if uncond_cross_attn_past_key_values is not None:
+                for kv in uncond_cross_attn_past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            mx.eval(*to_eval)
+
+            if callback is not None:
+                callback(step, target_new_length, codes)
+
+        # Remove BOS token
+        codes = codes[:, :, 1:]
+
+        # Decode full sequence to audio
+        audio = self.encodec.decode(codes)
+        audio_np = np.array(audio)
+
+        if audio_np.ndim == 3:
+            audio_np = audio_np[0]
+
+        # Calculate total duration
+        existing_frames = existing_codes.shape[-1]
+        total_frames = codes.shape[-1]
+        total_duration = total_frames / frame_rate
+
+        return GenerationOutput(
+            audio=audio_np,
+            sample_rate=self.config.audio_encoder.sampling_rate,
+            duration=total_duration,
+            codes=codes if return_codes else None,
+        )
+
+    def generate_with_melody(
+        self,
+        prompt: str,
+        melody_audio: mx.array,
+        melody_conditioner,
+        duration: float = 10.0,
+        temperature: float = 1.0,
+        top_k: int = 250,
+        top_p: float = 0.0,
+        guidance_scale: float = 3.0,
+        seed: Optional[int] = None,
+        callback: Optional[Callable[[int, int, mx.array], None]] = None,
+        return_codes: bool = False,
+    ) -> GenerationOutput:
+        """
+        Generate music with melody conditioning.
+
+        Uses chroma features extracted from reference audio to guide generation.
+        The model attends to both text embeddings (for style) and chroma embeddings
+        (for melody) simultaneously via cross-attention.
+
+        Args:
+            prompt: Text description of desired music
+            melody_audio: Reference audio for melody extraction (samples,) or (channels, samples)
+            melody_conditioner: MelodyConditioner instance with projection layer
+            duration: Target duration in seconds
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            guidance_scale: Classifier-free guidance scale
+            seed: Random seed for reproducibility
+            callback: Optional progress callback
+            return_codes: Whether to return raw audio codes
+
+        Returns:
+            GenerationOutput with melody-conditioned audio
+        """
+        # Validate inputs
+        if duration <= 0:
+            raise ValueError(f"duration must be positive, got {duration}")
+        max_duration = 30.0
+        if duration > max_duration:
+            raise ValueError(f"duration must be <= {max_duration} seconds, got {duration}")
+
+        if seed is not None:
+            mx.random.seed(seed)
+
+        # Normalize melody_audio shape (like generate_continuation does)
+        if melody_audio.ndim == 1:
+            melody_audio = melody_audio[None, :]  # (1, samples)
+        elif melody_audio.ndim == 3:
+            # Remove batch dimension if present
+            melody_audio = melody_audio[0]  # (channels, samples)
+
+        # Calculate target length
+        frame_rate = self.config.frame_rate
+        target_length = max(1, int(duration * frame_rate))
+
+        # Extract and project chroma embeddings from melody audio
+        # Pre-compute ALL chroma embeddings so model can attend to entire melody
+        chroma_embeddings = melody_conditioner.get_chroma_embeddings(
+            melody_audio, target_length
+        )  # (1, target_length, hidden_size)
+
+        # Evaluate chroma embeddings to prevent memory buildup
+        mx.eval(chroma_embeddings)
+
+        # Encode text prompt
+        encoder_hidden_states, encoder_attention_mask = self.text_encoder.encode(prompt)
+
+        # Combine text embeddings with ALL chroma embeddings for cross-attention
+        # This allows the model to attend to relevant melody frames at each step
+        combined_hidden_states = mx.concatenate(
+            [encoder_hidden_states, chroma_embeddings], axis=1
+        )
+        text_len = encoder_attention_mask.shape[1]
+        chroma_len = chroma_embeddings.shape[1]
+        combined_mask = mx.concatenate(
+            [encoder_attention_mask, mx.ones((1, chroma_len))], axis=1
+        )
+
+        # Evaluate combined embeddings to prevent memory buildup
+        mx.eval(combined_hidden_states, combined_mask)
+
+        # For CFG, also need unconditional encoding (text only, no melody)
+        if guidance_scale > 1.0:
+            uncond_hidden_states, uncond_mask = self.text_encoder.encode("")
+
+        # Initialize with BOS tokens
+        batch_size = 1
+        num_codebooks = self.config.decoder.num_codebooks
+        bos_token = self.config.decoder.bos_token_id
+        codes = mx.full((batch_size, num_codebooks, 1), bos_token, dtype=mx.int32)
+
+        # KV caches
+        past_key_values = None
+        cross_attn_past_key_values = None
+        uncond_past_key_values = None
+        uncond_cross_attn_past_key_values = None
+
+        # Generation loop with melody conditioning
+        for step in range(target_length):
+            # Decoder attends to combined text + melody embeddings
+            logits, past_key_values, cross_attn_past_key_values = self.decoder(
+                input_ids=codes if past_key_values is None else codes[:, :, -1:],
+                encoder_hidden_states=combined_hidden_states if cross_attn_past_key_values is None else None,
+                encoder_attention_mask=combined_mask,
+                past_key_values=past_key_values,
+                cross_attn_past_key_values=cross_attn_past_key_values,
+                use_cache=True,
+            )
+
+            next_logits = logits[:, :, -1, :]
+
+            # Apply CFG (unconditional path without melody)
+            if guidance_scale > 1.0:
+                uncond_logits, uncond_past_key_values, uncond_cross_attn_past_key_values = self.decoder(
+                    input_ids=codes if uncond_past_key_values is None else codes[:, :, -1:],
+                    encoder_hidden_states=uncond_hidden_states if uncond_cross_attn_past_key_values is None else None,
+                    encoder_attention_mask=uncond_mask,
+                    past_key_values=uncond_past_key_values,
+                    cross_attn_past_key_values=uncond_cross_attn_past_key_values,
+                    use_cache=True,
+                )
+                uncond_next = uncond_logits[:, :, -1, :]
+                next_logits = apply_classifier_free_guidance(
+                    next_logits, uncond_next, guidance_scale
+                )
+
+            # Sample next tokens
+            next_tokens = []
+            for cb in range(num_codebooks):
+                cb_logits = next_logits[:, cb, :]
+                next_token = sample_next_token(cb_logits, temperature, top_k, top_p)
+                next_tokens.append(next_token)
+
+            next_tokens = mx.stack(next_tokens, axis=1)
+            codes = mx.concatenate([codes, next_tokens], axis=-1)
+
+            # Evaluate to prevent memory buildup
+            to_eval = [codes]
+            if past_key_values is not None:
+                for kv in past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            if cross_attn_past_key_values is not None:
+                for kv in cross_attn_past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            if uncond_past_key_values is not None:
+                for kv in uncond_past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            if uncond_cross_attn_past_key_values is not None:
+                for kv in uncond_cross_attn_past_key_values:
+                    if kv is not None:
+                        to_eval.extend(x for x in kv if x is not None)
+            mx.eval(*to_eval)
+
+            if callback is not None:
+                callback(step, target_length, codes)
+
+        # Remove BOS token
+        codes = codes[:, :, 1:]
+
+        # Decode to audio
+        audio = self.encodec.decode(codes)
+        audio_np = np.array(audio)
+
+        if audio_np.ndim == 3:
+            audio_np = audio_np[0]
+
+        return GenerationOutput(
+            audio=audio_np,
+            sample_rate=self.config.audio_encoder.sampling_rate,
+            duration=duration,
+            codes=codes if return_codes else None,
+        )
 
 
 __all__ = [
