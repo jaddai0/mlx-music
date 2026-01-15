@@ -308,6 +308,142 @@ def load_sharded_safetensors(
     return weights
 
 
+def load_pytorch_bin(
+    path: Union[str, Path],
+    dtype: mx.Dtype = mx.bfloat16,
+) -> Dict[str, mx.array]:
+    """
+    Load weights from a PyTorch .bin file into MLX arrays.
+
+    Args:
+        path: Path to the .bin file
+        dtype: Target dtype for weights (default: bfloat16)
+
+    Returns:
+        Dictionary mapping weight names to MLX arrays
+
+    Note:
+        Requires PyTorch to be installed. Uses weights_only=True for security.
+    """
+    try:
+        import torch
+    except ImportError:
+        raise ImportError(
+            "PyTorch is required to load .bin files. "
+            "Install with: pip install torch"
+        )
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Weight file not found: {path}")
+
+    # Load with weights_only=True for security (prevents arbitrary code execution)
+    # map_location="cpu" prevents GPU memory usage during loading
+    torch_weights = torch.load(str(path), map_location="cpu", weights_only=True)
+
+    # Convert to MLX arrays
+    weights = {}
+    for key, tensor in torch_weights.items():
+        if isinstance(tensor, torch.Tensor):
+            # Convert bfloat16 to float32 first (numpy doesn't support bf16)
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.float()
+            # Convert to numpy then MLX
+            np_array = tensor.numpy()
+            arr = mx.array(np_array)
+            # Convert to target dtype
+            if arr.dtype != dtype and arr.dtype in (mx.float32, mx.float16, mx.bfloat16):
+                arr = arr.astype(dtype)
+            weights[key] = arr
+
+    return weights
+
+
+def load_sharded_pytorch(
+    directory: Union[str, Path],
+    dtype: mx.Dtype = mx.bfloat16,
+    show_progress: bool = True,
+) -> Dict[str, mx.array]:
+    """
+    Load weights from multiple sharded PyTorch .bin files.
+
+    Args:
+        directory: Directory containing .bin shards and pytorch_model.bin.index.json
+        dtype: Target dtype for weights
+        show_progress: Whether to show progress bar
+
+    Returns:
+        Combined dictionary of all weights
+
+    Raises:
+        FileNotFoundError: If index file or shards not found
+        PathTraversalError: If index file contains invalid paths
+        json.JSONDecodeError: If index file is malformed
+    """
+    directory = Path(directory).resolve()
+
+    # Check for index file
+    index_path = directory / "pytorch_model.bin.index.json"
+    if not index_path.exists():
+        raise FileNotFoundError(
+            f"PyTorch index file not found: {index_path}. "
+            f"Expected pytorch_model.bin.index.json for sharded weights."
+        )
+
+    # Check file size before loading
+    index_size = index_path.stat().st_size
+    if index_size > _MAX_JSON_SIZE:
+        raise ValueError(
+            f"Index file too large: {index_size} bytes (max: {_MAX_JSON_SIZE})"
+        )
+
+    with open(index_path, encoding="utf-8") as f:
+        index = json.load(f)
+
+    # Validate index structure
+    if not isinstance(index, dict):
+        raise ValueError("Invalid index file: expected a JSON object")
+
+    weight_map = index.get("weight_map", {})
+    if not isinstance(weight_map, dict):
+        raise ValueError("Invalid index file: weight_map must be a dict")
+
+    # Get unique shard files and validate each one
+    raw_shard_files = set(weight_map.values())
+
+    # Check shard count limit
+    if len(raw_shard_files) > _MAX_SHARD_COUNT:
+        raise ValueError(
+            f"Too many shard files: {len(raw_shard_files)} (max: {_MAX_SHARD_COUNT})"
+        )
+
+    shard_files = []
+    for shard_filename in raw_shard_files:
+        if not isinstance(shard_filename, str):
+            raise ValueError(
+                f"Invalid index file: shard filename must be string, got {type(shard_filename)}"
+            )
+        # Validate path is safe (no traversal)
+        safe_path = _validate_safe_path(directory, shard_filename)
+        shard_files.append(safe_path)
+
+    # Load each shard
+    weights = {}
+    iterator = tqdm(shard_files, desc="Loading PyTorch weights") if show_progress else shard_files
+
+    for shard_path in iterator:
+        shard_weights = load_pytorch_bin(shard_path, dtype=dtype)
+        weights.update(shard_weights)
+
+        # Check weight count limit
+        if len(weights) > _MAX_WEIGHT_COUNT:
+            raise ValueError(
+                f"Too many weight tensors: {len(weights)} (max: {_MAX_WEIGHT_COUNT})"
+            )
+
+    return weights
+
+
 def is_local_path(path_or_repo: str) -> bool:
     """Check if the input is a local path rather than a HuggingFace repo ID."""
     # A local path starts with /, ~, or .

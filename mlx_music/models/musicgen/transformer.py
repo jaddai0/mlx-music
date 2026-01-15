@@ -412,6 +412,12 @@ def load_musicgen_decoder_weights(
     """
     Load MusicGen decoder weights from pretrained model.
 
+    Supports both SafeTensors and PyTorch .bin formats:
+    1. model.safetensors.index.json (sharded safetensors)
+    2. model.safetensors (single safetensors)
+    3. pytorch_model.bin.index.json (sharded pytorch)
+    4. pytorch_model.bin (single pytorch)
+
     Args:
         model_path: Path to model directory
         dtype: Target dtype for weights
@@ -422,19 +428,29 @@ def load_musicgen_decoder_weights(
     from pathlib import Path
 
     from mlx_music.weights.weight_loader import (
+        load_pytorch_bin,
+        load_sharded_pytorch,
         load_sharded_safetensors,
         load_single_safetensors,
     )
 
     model_path = Path(model_path)
 
-    # Try sharded first, then single file
+    # Try formats in order of preference
     if (model_path / "model.safetensors.index.json").exists():
         all_weights = load_sharded_safetensors(model_path)
     elif (model_path / "model.safetensors").exists():
         all_weights = load_single_safetensors(model_path / "model.safetensors")
+    elif (model_path / "pytorch_model.bin.index.json").exists():
+        all_weights = load_sharded_pytorch(model_path)
+    elif (model_path / "pytorch_model.bin").exists():
+        all_weights = load_pytorch_bin(model_path / "pytorch_model.bin")
     else:
-        raise FileNotFoundError(f"No safetensors found in {model_path}")
+        raise FileNotFoundError(
+            f"No weights found in {model_path}. "
+            f"Expected model.safetensors, model.safetensors.index.json, "
+            f"pytorch_model.bin, or pytorch_model.bin.index.json"
+        )
 
     # Filter to decoder weights and remap keys
     decoder_weights = {}
