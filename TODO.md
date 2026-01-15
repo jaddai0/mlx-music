@@ -22,6 +22,12 @@
 |-------|--------|-------|
 | `ACE-Step/ACE-Step-v1-3.5B` | ✅ Supported | Full lyric support |
 
+### Stable Audio Models
+
+| Model | Status | Notes |
+|-------|--------|-------|
+| `stabilityai/stable-audio-open-1.0` | ✅ Supported | 44.1kHz stereo, up to 47s |
+
 ### Features
 
 | Feature | Status |
@@ -36,6 +42,9 @@
 | Lazy weight filtering | ✅ |
 | Stereo audio output | ✅ |
 | Lyric-conditioned generation (ACE-Step) | ✅ |
+| DiT diffusion transformer (Stable Audio) | ✅ |
+| High-quality 44.1kHz output (Stable Audio) | ✅ |
+| EDM DPM-Solver scheduling | ✅ |
 
 ---
 
@@ -45,4 +54,4 @@
 - Multi-rate EnCodec support
 - Streaming generation
 - ControlNet-style fine-grained conditioning
-- Additional audio models (AudioLDM, Stable Audio)
+- Additional audio models (AudioLDM, MusicLDM)

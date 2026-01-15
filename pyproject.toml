@@ -12,7 +12,7 @@ license = {text = "MIT"}
 authors = [
     {name = "MLX Music Contributors"}
 ]
-keywords = ["mlx", "music", "generation", "apple-silicon", "machine-learning"]
+keywords = ["mlx", "music", "generation", "apple-silicon", "machine-learning", "musicgen", "ace-step", "stable-audio"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
