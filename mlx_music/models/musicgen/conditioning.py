@@ -13,6 +13,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Valid device options for PyTorch
+VALID_DEVICES = {"cpu", "mps", "cuda"}
+
 
 class MusicGenTextEncoder:
     """
@@ -35,13 +38,67 @@ class MusicGenTextEncoder:
             model_name: T5 model name or path
             device: Device for PyTorch model ("cpu", "mps", "cuda")
             use_fp16: Whether to use FP16 precision
+
+        Raises:
+            ValueError: If device is not one of "cpu", "mps", "cuda"
         """
+        if device not in VALID_DEVICES:
+            raise ValueError(
+                f"Invalid device '{device}'. Must be one of: {', '.join(sorted(VALID_DEVICES))}"
+            )
+
         self.model_name = model_name
         self.device = device
         self.use_fp16 = use_fp16
 
         self._tokenizer = None
         self._encoder = None
+
+    def _move_model_to_device(self, model, device: str):
+        """
+        Move model to device with CPU fallback on failure.
+
+        Args:
+            model: PyTorch model to move
+            device: Target device
+
+        Returns:
+            Model on target device (or CPU if fallback occurred)
+        """
+        if device == "cpu":
+            return model.to("cpu")
+
+        try:
+            if device == "cuda":
+                return model.cuda()
+            else:
+                return model.to(device)
+        except Exception as e:
+            logger.warning(f"{device.upper()} failed ({e}), falling back to CPU")
+            self.device = "cpu"
+            return model.to("cpu")
+
+    def _move_tensors_to_device(self, *tensors):
+        """
+        Move tensors to the current device.
+
+        Args:
+            *tensors: PyTorch tensors to move
+
+        Returns:
+            Tuple of tensors on the current device
+        """
+        if self.device == "cpu":
+            return tensors if len(tensors) > 1 else tensors[0]
+
+        moved = []
+        for tensor in tensors:
+            if self.device == "cuda":
+                moved.append(tensor.cuda())
+            else:
+                moved.append(tensor.to(self.device))
+
+        return tuple(moved) if len(moved) > 1 else moved[0]
 
     def _load_model(self):
         """Lazy load the T5 model and tokenizer."""
@@ -60,23 +117,8 @@ class MusicGenTextEncoder:
         self._tokenizer = T5Tokenizer.from_pretrained(self.model_name)
         self._encoder = T5EncoderModel.from_pretrained(self.model_name)
 
-        # Move to device
-        if self.device == "mps":
-            try:
-                self._encoder = self._encoder.to("mps")
-            except Exception as e:
-                # Fallback to CPU if MPS fails - ensure model is actually on CPU
-                logger.warning(f"MPS failed ({e}), falling back to CPU")
-                self.device = "cpu"
-                self._encoder = self._encoder.to("cpu")
-        elif self.device == "cuda":
-            try:
-                self._encoder = self._encoder.cuda()
-            except Exception as e:
-                # Fallback to CPU if CUDA fails
-                logger.warning(f"CUDA failed ({e}), falling back to CPU")
-                self.device = "cpu"
-                self._encoder = self._encoder.to("cpu")
+        # Move to device with fallback
+        self._encoder = self._move_model_to_device(self._encoder, self.device)
 
         if self.use_fp16 and self.device != "cpu":
             self._encoder = self._encoder.half()
@@ -113,15 +155,9 @@ class MusicGenTextEncoder:
         )
 
         # Move to device
-        input_ids = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-
-        if self.device == "mps":
-            input_ids = input_ids.to("mps")
-            attention_mask = attention_mask.to("mps")
-        elif self.device == "cuda":
-            input_ids = input_ids.cuda()
-            attention_mask = attention_mask.cuda()
+        input_ids, attention_mask = self._move_tensors_to_device(
+            inputs["input_ids"], inputs["attention_mask"]
+        )
 
         # Encode
         with torch.no_grad():
@@ -166,15 +202,10 @@ class MusicGenTextEncoder:
             truncation=True,
         )
 
-        input_ids = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-
-        if self.device == "mps":
-            input_ids = input_ids.to("mps")
-            attention_mask = attention_mask.to("mps")
-        elif self.device == "cuda":
-            input_ids = input_ids.cuda()
-            attention_mask = attention_mask.cuda()
+        # Move to device
+        input_ids, attention_mask = self._move_tensors_to_device(
+            inputs["input_ids"], inputs["attention_mask"]
+        )
 
         with torch.no_grad():
             outputs = self._encoder(
