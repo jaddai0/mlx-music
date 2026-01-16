@@ -61,9 +61,9 @@ class StableAudio:
         >>> sf.write("output.wav", output.audio.T, output.sample_rate)
     """
 
-    # Duration constraints
-    MIN_DURATION = 1.0  # seconds
-    MAX_DURATION = 47.0  # seconds (model limit)
+    # Duration constraints (architectural limits from VAE latent sequence length)
+    MIN_DURATION = 1.0  # Minimum practical duration in seconds
+    MAX_DURATION = 47.0  # Maximum duration in seconds (limited by VAE training context)
 
     def __init__(
         self,
@@ -220,10 +220,10 @@ class StableAudio:
             Tuple of (text_embeds, pooled, neg_text_embeds, neg_pooled)
         """
         if self.text_encoder is None:
-            # Placeholder embeddings
+            # Placeholder embeddings using dimensions from config
             batch = 1
-            seq_len = 64
-            dim = 768
+            seq_len = 64  # Default T5 sequence length
+            dim = self.config.projection.text_encoder_dim
 
             text_embeds = mx.zeros((batch, seq_len, dim), dtype=self.dtype)
             pooled = mx.zeros((batch, dim), dtype=self.dtype)

@@ -226,13 +226,17 @@ class PlaceholderTextEncoder:
     Returns zero embeddings. Generation will not be conditioned on text.
     """
 
+    _warning_shown = False  # Class-level flag to show warning only once
+
     def __init__(self, hidden_size: int = 768):
         self.hidden_size = hidden_size
-        logger.warning(
-            "Using placeholder text encoder. "
-            "Text prompts will NOT condition generation. "
-            "Install with: pip install 'mlx-music[text-encoder]'"
-        )
+        if not PlaceholderTextEncoder._warning_shown:
+            logger.warning(
+                "Using placeholder text encoder. "
+                "Text prompts will NOT condition generation. "
+                "Install with: pip install 'mlx-music[text-encoder]'"
+            )
+            PlaceholderTextEncoder._warning_shown = True
 
     def encode(
         self,
@@ -286,31 +290,10 @@ def get_text_encoder(
     Returns:
         T5TextEncoder if available, else PlaceholderTextEncoder
     """
-    # Auto-detect device
+    # Auto-detect device using shared utility
     if device is None:
-        import platform
-
-        system = platform.system()
-        if system == "Darwin":
-            try:
-                import torch
-
-                if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    device = "mps"
-                else:
-                    device = "cpu"
-            except ImportError:
-                device = "cpu"
-        else:
-            try:
-                import torch
-
-                if torch.cuda.is_available():
-                    device = "cuda"
-                else:
-                    device = "cpu"
-            except ImportError:
-                device = "cpu"
+        from mlx_music.utils.device import get_default_torch_device
+        device = get_default_torch_device()
 
     if HAS_TRANSFORMERS and model_path is not None:
         try:

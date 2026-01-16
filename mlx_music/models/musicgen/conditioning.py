@@ -371,31 +371,10 @@ def get_text_encoder(
     if use_placeholder:
         return PlaceholderTextEncoder()
 
-    # Auto-detect device
+    # Auto-detect device using shared utility
     if device is None:
-        import platform
-
-        system = platform.system()
-        if system == "Darwin":
-            try:
-                import torch
-
-                if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    device = "mps"
-                else:
-                    device = "cpu"
-            except ImportError:
-                device = "cpu"
-        else:
-            try:
-                import torch
-
-                if torch.cuda.is_available():
-                    device = "cuda"
-                else:
-                    device = "cpu"
-            except ImportError:
-                device = "cpu"
+        from mlx_music.utils.device import get_default_torch_device
+        device = get_default_torch_device()
 
     try:
         return MusicGenTextEncoder(

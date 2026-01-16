@@ -13,6 +13,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mlx_music")
 
+# CLI Constants
+CLI_MAX_DURATION = 600.0  # Maximum duration to prevent resource exhaustion (10 minutes)
+LOG_PROMPT_MAX_LENGTH = 50  # Maximum prompt length to show in logs
+
+# Model-specific default values
+ACE_STEP_DEFAULT_STEPS = 60
+ACE_STEP_DEFAULT_GUIDANCE = 15.0
+MUSICGEN_DEFAULT_GUIDANCE = 3.0
+STABLE_AUDIO_DEFAULT_STEPS = 100
+STABLE_AUDIO_DEFAULT_GUIDANCE = 7.0
+
 
 def detect_model_family(model_path: str) -> str:
     """
@@ -52,16 +63,13 @@ def validate_args(args) -> None:
     Raises:
         SystemExit: If validation fails
     """
-    # Maximum duration to prevent resource exhaustion (10 minutes)
-    MAX_DURATION = 600.0
-
     # Validate duration
     if args.duration <= 0:
         logger.error(f"Duration must be positive, got {args.duration}")
         sys.exit(1)
 
-    if args.duration > MAX_DURATION:
-        logger.error(f"Duration must be <= {MAX_DURATION}s, got {args.duration}")
+    if args.duration > CLI_MAX_DURATION:
+        logger.error(f"Duration must be <= {CLI_MAX_DURATION}s, got {args.duration}")
         sys.exit(1)
 
     # Validate steps if provided
@@ -202,7 +210,7 @@ Examples:
 
     if args.command == "generate":
         # Set logging level
-        if hasattr(args, "verbose") and args.verbose:
+        if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
 
         generate_command(args)
@@ -246,7 +254,7 @@ def generate_command(args) -> None:
         sys.exit(130)
     except Exception as e:
         logger.error(f"Generation failed: {e}")
-        if hasattr(args, "verbose") and args.verbose:
+        if args.verbose:
             import traceback
             traceback.print_exc()
         sys.exit(1)
@@ -267,11 +275,11 @@ def _generate_ace_step(args) -> None:
     logger.info(f"Generating {args.duration}s of music...")
     logger.info(f"  Prompt: {args.prompt}")
     if args.lyrics:
-        logger.info(f"  Lyrics: {args.lyrics[:50]}...")
+        logger.info(f"  Lyrics: {args.lyrics[:LOG_PROMPT_MAX_LENGTH]}...")
 
     # Default values for ACE-Step
-    steps = args.steps or 60
-    guidance = args.guidance or 15.0
+    steps = args.steps or ACE_STEP_DEFAULT_STEPS
+    guidance = args.guidance or ACE_STEP_DEFAULT_GUIDANCE
 
     # Progress callback with try/finally for cleanup
     pbar = tqdm(total=steps, desc="Generating")
@@ -315,7 +323,7 @@ def _generate_musicgen(args) -> None:
     logger.info(f"  Prompt: {args.prompt}")
 
     # Default values for MusicGen
-    guidance = args.guidance or 3.0
+    guidance = args.guidance or MUSICGEN_DEFAULT_GUIDANCE
 
     # Check if extended generation is needed
     if args.duration > 30.0:
@@ -372,11 +380,11 @@ def _generate_stable_audio(args) -> None:
     logger.info(f"Generating {args.duration}s of music...")
     logger.info(f"  Prompt: {args.prompt}")
     if args.negative_prompt:
-        logger.info(f"  Negative: {args.negative_prompt[:50]}...")
+        logger.info(f"  Negative: {args.negative_prompt[:LOG_PROMPT_MAX_LENGTH]}...")
 
     # Default values for Stable Audio
-    steps = args.steps or 100
-    guidance = args.guidance or 7.0
+    steps = args.steps or STABLE_AUDIO_DEFAULT_STEPS
+    guidance = args.guidance or STABLE_AUDIO_DEFAULT_GUIDANCE
 
     # Progress callback with try/finally for cleanup
     pbar = tqdm(total=steps, desc="Generating")

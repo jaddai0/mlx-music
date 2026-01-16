@@ -36,6 +36,9 @@ class MusicGen:
         >>> sf.write("output.wav", output.audio.T, output.sample_rate)
     """
 
+    # Maximum duration for single generation (use generate_extended for longer)
+    MAX_DURATION = 30.0
+
     def __init__(
         self,
         decoder: MusicGenDecoder,
@@ -226,23 +229,27 @@ class MusicGen:
 
         if self.text_encoder is None:
             raise RuntimeError(
-                "Text encoder not loaded. Load with load_text_encoder=True"
+                "Text encoder not available. Reload model with "
+                "MusicGen.from_pretrained(..., load_text_encoder=True)"
             )
 
         if self.encodec is None:
-            raise RuntimeError("EnCodec not loaded. Load with load_encodec=True")
+            raise RuntimeError(
+                "EnCodec not available. Reload model with "
+                "MusicGen.from_pretrained(..., load_encodec=True)"
+            )
 
-        # Automatically route to extended generation for duration > 30s
-        max_duration = 30.0  # MusicGen default max
-        if duration > max_duration:
-            # Warn about batch limitation
+        # Automatically route to extended generation for duration > MAX_DURATION
+        if duration > self.MAX_DURATION:
+            # Warn about batch limitation - extended generation requires sequential context
             if isinstance(prompt, list) and len(prompt) > 1:
                 logger.warning(
-                    f"Batch generation not supported for duration > {max_duration}s. "
-                    f"Using only the first prompt (discarding {len(prompt) - 1} prompts)."
+                    f"Extended generation (>{self.MAX_DURATION}s) requires sequential context "
+                    f"and doesn't support batch processing. Using only the first prompt "
+                    f"(discarding {len(prompt) - 1} prompts)."
                 )
             logger.info(
-                f"Duration {duration}s exceeds {max_duration}s limit. "
+                f"Duration {duration}s exceeds {self.MAX_DURATION}s limit. "
                 "Automatically using generate_extended() for seamless long-form audio."
             )
             return self.generate_extended(
