@@ -5,6 +5,7 @@ Provides a high-level interface for loading and generating music
 with the Stable Audio Open model.
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple, Union
@@ -27,6 +28,8 @@ from mlx_music.models.stable_audio.scheduler import (
 )
 from mlx_music.models.stable_audio.transformer import StableAudioDiT
 from mlx_music.models.stable_audio.vae import AutoencoderOobleck
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -98,6 +101,7 @@ class StableAudio:
         model_path: Union[str, Path],
         dtype: mx.Dtype = mx.float32,
         load_text_encoder: bool = True,
+        strict_components: bool = True,
     ) -> "StableAudio":
         """
         Load Stable Audio from pretrained weights.
@@ -106,9 +110,14 @@ class StableAudio:
             model_path: Path to model directory or HuggingFace repo ID
             dtype: Data type for model weights
             load_text_encoder: Whether to load T5 text encoder
+            strict_components: If True (default), raise error if text encoder
+                fails to load. If False, fall back to placeholder (unconditional).
 
         Returns:
             StableAudio instance
+
+        Raises:
+            RuntimeError: If strict_components=True and text encoder fails to load
         """
         from mlx_music.weights.weight_loader import (
             download_model,
@@ -119,11 +128,11 @@ class StableAudio:
         model_path = download_model(str(model_path))
 
         # Load configuration
-        print("Loading configuration...")
+        logger.info("Loading configuration...")
         config = StableAudioConfig.from_pretrained(model_path)
 
         # Load transformer
-        print("Loading transformer...")
+        logger.info("Loading transformer...")
         transformer = StableAudioDiT(config.transformer)
         transformer_weights = load_stable_audio_weights(
             model_path, component="transformer", dtype=dtype
@@ -131,7 +140,7 @@ class StableAudio:
         transformer.load_weights(list(transformer_weights.items()), strict=False)
 
         # Load VAE
-        print("Loading VAE...")
+        logger.info("Loading VAE...")
         vae = AutoencoderOobleck(config.vae)
         vae_weights = load_stable_audio_weights(
             model_path, component="vae", dtype=dtype
@@ -139,7 +148,7 @@ class StableAudio:
         vae.load_weights(list(vae_weights.items()), strict=False)
 
         # Load projection model
-        print("Loading projection model...")
+        logger.info("Loading projection model...")
         projection_model = ProjectionModel(
             text_encoder_dim=config.projection.text_encoder_dim,
             output_dim=config.projection.output_dim,
@@ -152,16 +161,39 @@ class StableAudio:
         # Load text encoder
         text_encoder = None
         if load_text_encoder:
-            print("Loading text encoder (T5)...")
+            logger.info("Loading text encoder (T5)...")
             try:
                 from mlx_music.models.stable_audio.text_encoder import get_text_encoder
                 text_encoder = get_text_encoder(model_path)
-                print("Text encoder loaded successfully!")
-            except Exception as e:
-                print(f"Warning: Could not load text encoder: {e}")
-                print("Using placeholder text encoder")
 
-        print("Model loaded successfully!")
+                # Check if we got a placeholder encoder
+                from mlx_music.models.stable_audio.text_encoder import PlaceholderTextEncoder
+                if isinstance(text_encoder, PlaceholderTextEncoder):
+                    if strict_components:
+                        raise RuntimeError(
+                            "Text encoder not available. Text prompts will not condition generation. "
+                            "Install with: pip install 'mlx-music[text-encoder]' "
+                            "Or set strict_components=False to use unconditional generation."
+                        )
+                    else:
+                        logger.warning(
+                            "Using placeholder text encoder. "
+                            "Text prompts will NOT condition generation."
+                        )
+                else:
+                    logger.info("Text encoder loaded successfully!")
+            except Exception as e:
+                if strict_components:
+                    raise RuntimeError(
+                        f"Failed to load text encoder: {e}. "
+                        "Install with: pip install 'mlx-music[text-encoder]' "
+                        "Or set strict_components=False to use unconditional generation."
+                    )
+                else:
+                    logger.warning(f"Could not load text encoder: {e}")
+                    logger.warning("Using placeholder text encoder (unconditional generation)")
+
+        logger.info("Model loaded successfully!")
 
         return cls(
             transformer=transformer,

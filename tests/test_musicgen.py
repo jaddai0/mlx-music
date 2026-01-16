@@ -1,5 +1,6 @@
 """Tests for MusicGen MLX implementation."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -8,9 +9,12 @@ import numpy as np
 import pytest
 
 
-# Test model path - update if models are in different location
-MUSICGEN_SMALL_PATH = "/Users/dustinpainter/Dev-Projects/audio-models/MusicGen-small"
-MUSICGEN_MELODY_PATH = "/Users/dustinpainter/Dev-Projects/audio-models/MusicGen-melody"
+# Test model paths from environment variables (for CI-friendly testing)
+# Set these environment variables to run integration tests with real models:
+#   export MUSICGEN_SMALL_PATH=/path/to/MusicGen-small
+#   export MUSICGEN_MELODY_PATH=/path/to/MusicGen-melody
+MUSICGEN_SMALL_PATH = os.environ.get("MUSICGEN_SMALL_PATH", "")
+MUSICGEN_MELODY_PATH = os.environ.get("MUSICGEN_MELODY_PATH", "")
 
 
 class TestMusicGenLazyLoading:
@@ -67,8 +71,8 @@ class TestMusicGenConfig:
         assert hasattr(config, "text_encoder")
 
     @pytest.mark.skipif(
-        not Path(MUSICGEN_SMALL_PATH).exists(),
-        reason="MusicGen-small model not found locally",
+        not MUSICGEN_SMALL_PATH or not Path(MUSICGEN_SMALL_PATH).exists(),
+        reason="MUSICGEN_SMALL_PATH not set or model not found",
     )
     def test_config_from_pretrained_small(self):
         """Test loading config from MusicGen-small checkpoint."""
@@ -83,8 +87,8 @@ class TestMusicGenConfig:
         assert config.decoder.num_codebooks == 4
 
     @pytest.mark.skipif(
-        not Path(MUSICGEN_MELODY_PATH).exists(),
-        reason="MusicGen-melody model not found locally",
+        not MUSICGEN_MELODY_PATH or not Path(MUSICGEN_MELODY_PATH).exists(),
+        reason="MUSICGEN_MELODY_PATH not set or model not found",
     )
     def test_config_from_pretrained_melody(self):
         """Test loading config from MusicGen-melody checkpoint."""
@@ -382,8 +386,8 @@ class TestMusicGenCodecs:
 
 
 @pytest.mark.skipif(
-    not Path(MUSICGEN_SMALL_PATH).exists(),
-    reason="MusicGen-small model not found locally",
+    not MUSICGEN_SMALL_PATH or not Path(MUSICGEN_SMALL_PATH).exists(),
+    reason="MUSICGEN_SMALL_PATH not set or model not found",
 )
 class TestMusicGenModelLoading:
     """Test MusicGen model loading (requires local models)."""

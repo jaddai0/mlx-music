@@ -4,6 +4,7 @@ MusicGen main model class.
 High-level interface for loading and generating music with MusicGen.
 """
 
+import logging
 from pathlib import Path
 from typing import Callable, List, Optional, Union
 
@@ -14,6 +15,8 @@ from .config import MusicGenConfig
 from .conditioning import MelodyConditioner, get_text_encoder
 from .generation import GenerationOutput, MusicGenGenerator
 from .transformer import MusicGenDecoder, load_musicgen_decoder_weights
+
+logger = logging.getLogger(__name__)
 
 
 class MusicGen:
@@ -106,36 +109,36 @@ class MusicGen:
         model_path = download_model(str(model_path))
 
         # Load config
-        print("Loading configuration...")
+        logger.info("Loading configuration...")
         config = MusicGenConfig.from_pretrained(model_path)
 
         # Create and load decoder
-        print(f"Loading decoder ({config.decoder.num_hidden_layers} layers)...")
+        logger.info(f"Loading decoder ({config.decoder.num_hidden_layers} layers)...")
         decoder = MusicGenDecoder(config.decoder)
         weights = load_musicgen_decoder_weights(model_path, dtype)
 
         # Map weights to model parameters
         decoder.load_weights(list(weights.items()), strict=False)
-        print(f"Decoder loaded: {config.decoder.hidden_size}d, {config.decoder.num_attention_heads} heads")
+        logger.info(f"Decoder loaded: {config.decoder.hidden_size}d, {config.decoder.num_attention_heads} heads")
 
         # Load text encoder
         text_encoder = None
         if load_text_encoder:
-            print("Loading text encoder (T5)...")
+            logger.info("Loading text encoder (T5)...")
             try:
                 text_encoder = get_text_encoder(
                     model_path=model_path,
                     use_fp16=(dtype == mx.float16),
                 )
-                print("Text encoder loaded successfully!")
+                logger.info("Text encoder loaded successfully!")
             except Exception as e:
-                print(f"Warning: Could not load text encoder: {e}")
-                print("Using placeholder encoder (generation will have limited quality)")
+                logger.warning(f"Could not load text encoder: {e}")
+                logger.warning("Using placeholder encoder (generation will have limited quality)")
 
         # Load EnCodec
         encodec = None
         if load_encodec:
-            print("Loading EnCodec audio codec...")
+            logger.info("Loading EnCodec audio codec...")
             try:
                 from mlx_music.codecs import get_encodec
 
@@ -148,10 +151,10 @@ class MusicGen:
                     audio_channels=audio_channels,
                 )
                 channels_str = "stereo" if audio_channels == 2 else "mono"
-                print(f"EnCodec loaded successfully! ({channels_str})")
+                logger.info(f"EnCodec loaded successfully! ({channels_str})")
             except Exception as e:
-                print(f"Warning: Could not load EnCodec: {e}")
-                print("Audio decoding will use placeholder (silence)")
+                logger.warning(f"Could not load EnCodec: {e}")
+                logger.warning("Audio decoding will use placeholder (silence)")
 
         # Load melody conditioner for melody variant
         melody_conditioner = None
@@ -162,7 +165,7 @@ class MusicGen:
                 hidden_size=config.hidden_size,
                 frame_rate=config.frame_rate,
             )
-            print("Melody conditioner initialized")
+            logger.info("Melody conditioner initialized")
 
         return cls(
             decoder=decoder,
@@ -214,12 +217,25 @@ class MusicGen:
         if self.encodec is None:
             raise RuntimeError("EnCodec not loaded. Load with load_encodec=True")
 
-        # Validate duration
+        # Automatically route to extended generation for duration > 30s
         max_duration = 30.0  # MusicGen default max
         if duration > max_duration:
-            print(
-                f"Warning: Duration {duration}s exceeds recommended max {max_duration}s. "
-                "Generation may be slow or fail."
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(
+                f"Duration {duration}s exceeds {max_duration}s limit. "
+                "Automatically using generate_extended() for seamless long-form audio."
+            )
+            return self.generate_extended(
+                prompt=prompt if isinstance(prompt, str) else prompt[0],
+                duration=duration,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                guidance_scale=guidance_scale,
+                use_sampling=use_sampling,
+                seed=seed,
+                callback=callback,
             )
 
         return self.generator.generate(

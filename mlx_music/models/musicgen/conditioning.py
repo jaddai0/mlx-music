@@ -4,11 +4,14 @@ MusicGen conditioning modules.
 Text encoder and optional melody conditioning for MusicGen models.
 """
 
+import logging
 from typing import Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class MusicGenTextEncoder:
@@ -63,7 +66,7 @@ class MusicGenTextEncoder:
                 self._encoder = self._encoder.to("mps")
             except Exception as e:
                 # Fallback to CPU if MPS fails - ensure model is actually on CPU
-                print(f"Warning: MPS failed ({e}), falling back to CPU")
+                logger.warning(f"MPS failed ({e}), falling back to CPU")
                 self.device = "cpu"
                 self._encoder = self._encoder.to("cpu")
         elif self.device == "cuda":
@@ -71,7 +74,7 @@ class MusicGenTextEncoder:
                 self._encoder = self._encoder.cuda()
             except Exception as e:
                 # Fallback to CPU if CUDA fails
-                print(f"Warning: CUDA failed ({e}), falling back to CPU")
+                logger.warning(f"CUDA failed ({e}), falling back to CPU")
                 self.device = "cpu"
                 self._encoder = self._encoder.to("cpu")
 
@@ -401,8 +404,8 @@ def get_text_encoder(
             use_fp16=use_fp16,
         )
     except Exception as e:
-        print(f"Warning: Could not load text encoder: {e}")
-        print("Using placeholder encoder (generation will have limited quality)")
+        logger.warning(f"Could not load text encoder: {e}")
+        logger.warning("Using placeholder encoder (generation will have limited quality)")
         return PlaceholderTextEncoder()
 
 

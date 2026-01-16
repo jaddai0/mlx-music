@@ -42,6 +42,9 @@ dependencies = [
 text-encoder = [
     "torch>=2.0.0",
 ]
+codecs = [
+    "mlx-audio>=0.1.0",
+]
 lyrics = [
     "num2words>=0.5.12",
     "pypinyin>=0.49.0",
@@ -55,7 +58,7 @@ dev = [
     "mypy>=1.8.0",
 ]
 all = [
-    "mlx-music[text-encoder,lyrics,dev]",
+    "mlx-music[text-encoder,codecs,lyrics,dev]",
 ]
 
 [project.scripts]

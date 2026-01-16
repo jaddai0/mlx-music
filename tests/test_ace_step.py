@@ -1,5 +1,6 @@
 """Tests for ACE-Step MLX implementation."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -8,8 +9,10 @@ import numpy as np
 import pytest
 
 
-# Test model path - update if models are in different location
-ACE_STEP_PATH = "/Users/dustinpainter/Dev-Projects/audio-models/ACE-Step"
+# Test model path from environment variable (for CI-friendly testing)
+# Set this environment variable to run integration tests with real models:
+#   export ACE_STEP_PATH=/path/to/ACE-Step
+ACE_STEP_PATH = os.environ.get("ACE_STEP_PATH", "")
 
 
 class TestACEStepLazyLoading:
