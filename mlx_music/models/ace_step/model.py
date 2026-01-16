@@ -112,6 +112,7 @@ class ACEStep:
         dtype: mx.Dtype = mx.bfloat16,
         load_text_encoder: bool = True,
         load_audio_pipeline: bool = True,
+        strict_components: bool = True,
     ) -> "ACEStep":
         """
         Load ACE-Step from pretrained weights.
@@ -126,9 +127,14 @@ class ACEStep:
             dtype: Data type for model weights
             load_text_encoder: Whether to load text encoder
             load_audio_pipeline: Whether to load DCAE + vocoder (needed for audio output)
+            strict_components: If True (default), raise error if text encoder
+                or audio pipeline fails to load. If False, fall back to placeholders.
 
         Returns:
             ACEStep instance
+
+        Raises:
+            RuntimeError: If strict_components=True and components fail to load
         """
         # Resolve path (handles both local paths and HuggingFace repo IDs)
         model_path = download_model(str(model_path))
@@ -155,35 +161,38 @@ class ACEStep:
         if load_text_encoder:
             logger.info("Loading text encoder (UMT5)...")
             try:
-                # Determine device for PyTorch encoder
-                import platform
-                device = "cpu"  # Default to CPU
-                system = platform.system()
-
-                if system == "Darwin":
-                    # macOS: try MPS (Metal Performance Shaders) for PyTorch
-                    try:
-                        import torch
-                        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                            device = "mps"
-                    except ImportError:
-                        pass
-                else:
-                    # Linux/Windows: try CUDA for PyTorch
-                    try:
-                        import torch
-                        if torch.cuda.is_available():
-                            device = "cuda"
-                    except ImportError:
-                        pass
+                # Use shared device detection utility
+                from mlx_music.utils.device import get_default_torch_device
+                device = get_default_torch_device()
 
                 text_encoder = get_text_encoder(
                     model_path=model_path,
                     device=device,
                     use_fp16=(dtype == mx.float16),
                 )
-                logger.info(f"Text encoder loaded successfully on {device}!")
+                # Check if we got a placeholder
+                from mlx_music.models.ace_step.text_encoder import PlaceholderTextEncoder
+                if isinstance(text_encoder, PlaceholderTextEncoder):
+                    if strict_components:
+                        raise RuntimeError(
+                            "Text encoder failed to load (got placeholder). "
+                            "Install with: pip install 'mlx-music[text-encoder]' "
+                            "or use strict_components=False to allow placeholder."
+                        )
+                    logger.warning("Using placeholder encoder (generation will have limited quality)")
+                else:
+                    logger.info(f"Text encoder loaded successfully on {device}!")
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except RuntimeError:
+                # Re-raise RuntimeError from strict_components check
+                raise
             except Exception as e:
+                if strict_components:
+                    raise RuntimeError(
+                        f"Text encoder failed to load: {e}. "
+                        "Use strict_components=False to allow placeholder."
+                    ) from e
                 logger.warning(f"Could not load text encoder: {e}")
                 logger.warning("Using placeholder encoder (generation will have limited quality)")
 
@@ -192,7 +201,14 @@ class ACEStep:
             try:
                 audio_pipeline = MusicDCAEPipeline.from_pretrained(str(model_path), dtype=dtype)
                 logger.info("Audio pipeline loaded successfully!")
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except Exception as e:
+                if strict_components:
+                    raise RuntimeError(
+                        f"Audio pipeline failed to load: {e}. "
+                        "Use strict_components=False to allow placeholder."
+                    ) from e
                 logger.warning(f"Could not load audio pipeline: {e}")
                 logger.warning("Audio decoding will use placeholder (silence)")
 
@@ -380,8 +396,25 @@ class ACEStep:
             GenerationOutput with audio and metadata
 
         Raises:
-            ValueError: If duration is outside valid range
+            ValueError: If duration or other parameters are outside valid range
         """
+        # Validate num_inference_steps
+        if num_inference_steps <= 0:
+            raise ValueError(f"num_inference_steps must be positive, got {num_inference_steps}")
+        if num_inference_steps > 1000:
+            raise ValueError(
+                f"num_inference_steps={num_inference_steps} is extremely high (max recommended: 1000). "
+                "This will be very slow and may not improve quality."
+            )
+
+        # Validate guidance_scale
+        if guidance_scale < 0:
+            raise ValueError(f"guidance_scale must be >= 0, got {guidance_scale}")
+
+        # Validate callback
+        if callback is not None and not callable(callback):
+            raise TypeError(f"callback must be callable, got {type(callback).__name__}")
+
         # Validate duration
         if duration < self.MIN_DURATION:
             raise ValueError(
@@ -447,8 +480,8 @@ class ACEStep:
                 lyric_mask,
             )
 
-            # Classifier-free guidance
-            if guidance_scale > 1.0:
+            # Classifier-free guidance (skip only when guidance_scale == 1.0)
+            if guidance_scale != 1.0:
                 # Evaluate conditional prediction first to free intermediate tensors
                 mx.eval(noise_pred)
                 # Get unconditional prediction

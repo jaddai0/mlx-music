@@ -294,7 +294,17 @@ def get_encodec(
             )
         return PlaceholderEnCodec.from_pretrained(model_id, dtype, audio_channels)
 
-    return EnCodecWrapper.from_pretrained(model_id, dtype)
+    wrapper = EnCodecWrapper.from_pretrained(model_id, dtype)
+
+    # Validate that loaded model has expected number of channels
+    actual_channels = wrapper.audio_channels
+    if actual_channels != audio_channels:
+        logger.warning(
+            f"EnCodec model has {actual_channels} channel(s) but {audio_channels} expected. "
+            f"This may cause audio quality issues."
+        )
+
+    return wrapper
 
 
 __all__ = [

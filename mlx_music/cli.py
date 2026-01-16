@@ -15,6 +15,7 @@ logger = logging.getLogger("mlx_music")
 
 # CLI Constants
 CLI_MAX_DURATION = 600.0  # Maximum duration to prevent resource exhaustion (10 minutes)
+CLI_MAX_STEPS = 1000  # Maximum inference steps to prevent extreme slowness
 LOG_PROMPT_MAX_LENGTH = 50  # Maximum prompt length to show in logs
 
 # Model-specific default values
@@ -76,13 +77,17 @@ def validate_args(args) -> None:
         sys.exit(1)
 
     # Validate steps if provided
-    if args.steps is not None and args.steps <= 0:
-        logger.error(f"Steps must be positive, got {args.steps}")
-        sys.exit(1)
+    if args.steps is not None:
+        if args.steps <= 0:
+            logger.error(f"Steps must be positive, got {args.steps}")
+            sys.exit(1)
+        if args.steps > CLI_MAX_STEPS:
+            logger.error(f"Steps must be <= {CLI_MAX_STEPS}, got {args.steps}")
+            sys.exit(1)
 
     # Validate guidance if provided
-    if args.guidance is not None and args.guidance <= 0:
-        logger.error(f"Guidance scale must be positive, got {args.guidance}")
+    if args.guidance is not None and args.guidance < 0:
+        logger.error(f"Guidance scale must be >= 0, got {args.guidance}")
         sys.exit(1)
 
 
@@ -264,12 +269,14 @@ def generate_command(args) -> None:
     # Update args with resolved model
     args.model = model
 
-    # Warn about incompatible parameter combinations
+    # Warn about and nullify incompatible parameter combinations
     if args.lyrics and engine != "ace-step":
         logger.warning(f"--lyrics is only supported for ACE-Step. Ignoring for {engine}.")
+        args.lyrics = None
 
     if args.negative_prompt and engine != "stable-audio":
         logger.warning(f"--negative-prompt is only supported for Stable Audio. Ignoring for {engine}.")
+        args.negative_prompt = None
 
     # Ensure output directory exists
     ensure_output_directory(args.output)
