@@ -201,7 +201,9 @@ class LayerNorm1d(nn.Module):
         # x: (batch, time, channels) - NLC format
         mean = mx.mean(x, axis=-1, keepdims=True)
         var = mx.var(x, axis=-1, keepdims=True)
-        x = (x - mean) / mx.sqrt(var + self.eps)
+        # Use mx.maximum for numerical stability with bfloat16
+        std = mx.sqrt(mx.maximum(var, self.eps))
+        x = (x - mean) / std
         return x * self.weight + self.bias
 
 

@@ -167,12 +167,66 @@ def sample_next_token(
     return next_token[:, None]
 
 
+def _compute_rms(x: mx.array, eps: float = 1e-8) -> mx.array:
+    """
+    Compute root mean square (standard deviation from zero) of a tensor.
+
+    Args:
+        x: Input tensor
+        eps: Small epsilon to avoid division by zero
+
+    Returns:
+        RMS value with shape (..., 1) preserving all dims except last
+    """
+    return mx.sqrt(mx.mean(x ** 2, axis=-1, keepdims=True) + eps)
+
+
+def apply_cfg_rescale(
+    guided_output: mx.array,
+    cond_output: mx.array,
+    rescale_phi: float = 0.7,
+) -> mx.array:
+    """
+    Apply CFG rescaling to prevent over-saturation at high guidance scales.
+
+    High CFG values (>7) can cause the output to become over-saturated,
+    leading to artifacts. This rescaling technique normalizes the guided
+    output to match the standard deviation of the conditional output.
+
+    Reference: "Common Diffusion Noise Schedules and Sample Steps are Flawed"
+    (https://arxiv.org/abs/2305.08891)
+
+    Args:
+        guided_output: Output after CFG has been applied
+        cond_output: Original conditional output (before CFG)
+        rescale_phi: Interpolation factor between rescaled and original
+                     (0.0 = no rescaling, 1.0 = full rescaling)
+                     Recommended: 0.7
+
+    Returns:
+        Rescaled guided output
+    """
+    if rescale_phi <= 0.0:
+        return guided_output
+
+    # Calculate RMS (standard deviation from zero) for both outputs
+    std_cond = _compute_rms(cond_output)
+    std_guided = _compute_rms(guided_output)
+
+    # Rescale guided output to match conditional std
+    rescaled = guided_output * (std_cond / std_guided)
+
+    # Interpolate between rescaled and original guided output
+    return rescale_phi * rescaled + (1 - rescale_phi) * guided_output
+
+
 def apply_classifier_free_guidance(
     cond_logits: mx.array,
     uncond_logits: mx.array,
     guidance_scale: float,
     cond_beta_logits: Optional[mx.array] = None,
     guidance_scale_beta: float = 0.0,
+    rescale_phi: float = 0.0,
 ) -> mx.array:
     """
     Apply classifier-free guidance to logits.
@@ -187,6 +241,8 @@ def apply_classifier_free_guidance(
         guidance_scale: Primary CFG scale (1.0 = no guidance)
         cond_beta_logits: Secondary conditioned logits (e.g., text only, no melody)
         guidance_scale_beta: Secondary CFG scale (0.0 = disabled)
+        rescale_phi: CFG rescale factor to prevent over-saturation (0.0 = disabled,
+                     0.7 recommended for high guidance scales >7)
 
     Returns:
         Guided logits
@@ -200,6 +256,10 @@ def apply_classifier_free_guidance(
     # Double CFG: add secondary guidance if enabled
     if cond_beta_logits is not None and guidance_scale_beta > 0.0:
         result = result + guidance_scale_beta * (cond_beta_logits - uncond_logits)
+
+    # Apply rescaling if enabled (recommended for guidance_scale > 7)
+    if rescale_phi > 0.0:
+        result = apply_cfg_rescale(result, cond_logits, rescale_phi)
 
     return result
 
@@ -1170,6 +1230,7 @@ __all__ = [
     "top_k_filtering",
     "top_p_filtering",
     "sample_next_token",
+    "apply_cfg_rescale",
     "apply_classifier_free_guidance",
     "blend_overlapping_audio",
     "MusicGenGenerator",

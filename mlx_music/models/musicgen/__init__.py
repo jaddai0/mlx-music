@@ -12,6 +12,12 @@ from .config import (
 )
 from .model import MusicGen
 from .generation import GenerationConfig, GenerationOutput
+from .kv_cache import (
+    KVCache,
+    CrossAttentionCache,
+    MusicGenCacheState,
+    create_causal_mask,
+)
 
 __all__ = [
     "MusicGen",
@@ -21,4 +27,8 @@ __all__ = [
     "MusicGenTextEncoderConfig",
     "GenerationConfig",
     "GenerationOutput",
+    "KVCache",
+    "CrossAttentionCache",
+    "MusicGenCacheState",
+    "create_causal_mask",
 ]

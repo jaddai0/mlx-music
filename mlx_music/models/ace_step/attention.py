@@ -41,7 +41,10 @@ class RMSNorm(nn.Module):
             self.weight = mx.ones((dim,))
 
     def __call__(self, x: mx.array) -> mx.array:
-        rms = mx.sqrt(mx.mean(x * x, axis=-1, keepdims=True) + self.eps)
+        # Standard RMSNorm: sqrt(mean(x^2) + eps)
+        # Adding eps BEFORE sqrt is correct and efficient - ensures valid denominator
+        ms = mx.mean(x * x, axis=-1, keepdims=True)
+        rms = mx.sqrt(ms + self.eps)
         x = x / rms
         if self.elementwise_affine:
             x = x * self.weight

@@ -26,7 +26,10 @@ class RMSNorm(nn.Module):
         self.weight = mx.ones((dim,))
 
     def __call__(self, x: mx.array) -> mx.array:
-        rms = mx.sqrt(mx.mean(x * x, axis=-1, keepdims=True) + self.eps)
+        # Standard RMSNorm: sqrt(mean(x^2) + eps)
+        # Adding eps BEFORE sqrt is correct and efficient - ensures valid denominator
+        ms = mx.mean(x * x, axis=-1, keepdims=True)
+        rms = mx.sqrt(ms + self.eps)
         return (x / rms) * self.weight
 
 
@@ -463,6 +466,11 @@ class StableAudioDiT(nn.Module):
     - Adaptive layer normalization for timestep
     """
 
+    # Frequency for calling mx.eval to prevent computation graph explosion.
+    # Every N blocks, we materialize intermediate results to bound memory usage.
+    # 6 blocks balances memory efficiency vs. graph optimization benefits.
+    MATERIALIZE_BLOCK_FREQUENCY: int = 6
+
     def __init__(self, config: DiTConfig):
         super().__init__()
         self.config = config
@@ -554,8 +562,8 @@ class StableAudioDiT(nn.Module):
         # Get rotary embeddings
         cos, sin = self.rotary_emb(seq_len)
 
-        # Process through blocks
-        for block in self.blocks:
+        # Process through blocks with memory checkpointing
+        for i, block in enumerate(self.blocks):
             x = block(
                 x,
                 encoder_hidden_states,
@@ -564,6 +572,9 @@ class StableAudioDiT(nn.Module):
                 sin,
                 encoder_attention_mask,
             )
+            # Periodically materialize to prevent graph explosion and reduce memory
+            if (i + 1) % self.MATERIALIZE_BLOCK_FREQUENCY == 0:
+                mx.eval(x)
 
         # Output projection
         x = self.norm_out(x)

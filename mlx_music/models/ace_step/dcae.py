@@ -56,7 +56,10 @@ class GroupNorm2d(nn.Module):
         # For shape (batch, h, w, groups, group_size), normalize over axes (1, 2, 4)
         mean = mx.mean(x, axis=(1, 2, 4), keepdims=True)
         var = mx.var(x, axis=(1, 2, 4), keepdims=True)
-        x = (x - mean) / mx.sqrt(var + self.eps)
+        # Standard GroupNorm: sqrt(var + eps)
+        # Adding eps BEFORE sqrt is correct - variance is non-negative by definition
+        std = mx.sqrt(var + self.eps)
+        x = (x - mean) / std
         x = x.reshape(batch, h, w, c)
         return x * self.weight + self.bias
 
