@@ -187,10 +187,22 @@ def quantize_model(
 
 def get_model_size(model: nn.Module) -> Tuple[int, float]:
     """
-    Get model size in parameters and bytes.
+    Get model size in parameters and bytes, accounting for quantization.
+
+    This function properly accounts for quantized layers by examining the
+    actual storage format. MLX quantized layers store:
+    - Quantized weight tensor (uint32 packed bits)
+    - Scales tensor (float16/bfloat16)
+    - Biases tensor (float16/bfloat16)
+
+    For non-quantized layers, it uses the standard nbytes calculation.
 
     Returns:
         Tuple of (num_parameters, size_in_mb)
+
+    Example:
+        >>> num_params, size_mb = get_model_size(model)
+        >>> print(f"Model: {num_params:,} params, {size_mb:.1f} MB")
     """
     num_params = 0
     total_bytes = 0
@@ -202,12 +214,88 @@ def get_model_size(model: nn.Module) -> Tuple[int, float]:
             if isinstance(value, dict):
                 count_params(value, full_name)
             elif isinstance(value, mx.array):
+                # Count parameters (logical elements, not storage)
                 num_params += value.size
+
+                # For quantized weight storage, MLX stores packed uint32 values
+                # The actual memory footprint is in value.nbytes
                 total_bytes += value.nbytes
 
     count_params(model.parameters())
 
     return num_params, total_bytes / (1024 * 1024)
+
+
+def get_model_size_detailed(model: nn.Module) -> Dict[str, Any]:
+    """
+    Get detailed model size breakdown with quantization awareness.
+
+    Provides a comprehensive breakdown including:
+    - Total parameters and memory
+    - Per-component breakdown
+    - Quantized vs non-quantized layer counts
+    - Effective bits per parameter
+
+    Returns:
+        Dict with detailed size information:
+        - num_params: Total parameter count
+        - size_mb: Total size in MB
+        - quantized_layers: Number of quantized layers
+        - non_quantized_layers: Number of non-quantized layers
+        - effective_bits_per_param: Average bits per parameter
+        - breakdown: Dict of component sizes
+
+    Example:
+        >>> info = get_model_size_detailed(model)
+        >>> print(f"Effective precision: {info['effective_bits_per_param']:.1f} bits/param")
+    """
+    num_params = 0
+    total_bytes = 0
+    quantized_layers = 0
+    non_quantized_layers = 0
+    breakdown = {}
+
+    def count_params(params, prefix=""):
+        nonlocal num_params, total_bytes
+        for name, value in params.items():
+            full_name = f"{prefix}.{name}" if prefix else name
+            if isinstance(value, dict):
+                count_params(value, full_name)
+            elif isinstance(value, mx.array):
+                num_params += value.size
+                total_bytes += value.nbytes
+
+                # Track in breakdown by top-level component
+                component = full_name.split('.')[0] if '.' in full_name else full_name
+                if component not in breakdown:
+                    breakdown[component] = {'params': 0, 'bytes': 0}
+                breakdown[component]['params'] += value.size
+                breakdown[component]['bytes'] += value.nbytes
+
+    count_params(model.parameters())
+
+    # Count quantized vs non-quantized layers using existing _iter_modules
+    # This reuses the safe iteration logic that handles cycles
+    for _, module in _iter_modules(model):
+        if hasattr(module, 'scales'):  # QuantizedLinear
+            quantized_layers += 1
+        elif isinstance(module, nn.Linear):
+            non_quantized_layers += 1
+
+    # Calculate effective bits per parameter
+    # If model is fully bfloat16, effective bits = 16
+    # If quantized, effective bits < 16
+    effective_bits = (total_bytes * 8) / num_params if num_params > 0 else 16.0
+
+    return {
+        'num_params': num_params,
+        'size_mb': total_bytes / (1024 * 1024),
+        'quantized_layers': quantized_layers,
+        'non_quantized_layers': non_quantized_layers,
+        'effective_bits_per_param': effective_bits,
+        'breakdown': {k: {'params': v['params'], 'size_mb': v['bytes'] / (1024 * 1024)}
+                      for k, v in breakdown.items()},
+    }
 
 
 def save_quantized_model(
@@ -616,9 +704,18 @@ def get_metal_memory_info(cache_ttl_ms: float = 0.0) -> Dict[str, float]:
                 return cached_result
 
     try:
-        active = mx.metal.get_active_memory() / (1024 * 1024)
-        peak = mx.metal.get_peak_memory() / (1024 * 1024)
-        cache = mx.metal.get_cache_memory() / (1024 * 1024)
+        # Use new API if available, fall back to deprecated
+        if hasattr(mx, 'get_active_memory'):
+            active = mx.get_active_memory() / (1024 * 1024)
+            peak = mx.get_peak_memory() / (1024 * 1024)
+            cache = mx.get_cache_memory() / (1024 * 1024)
+        elif hasattr(mx, 'metal'):
+            active = mx.metal.get_active_memory() / (1024 * 1024)
+            peak = mx.metal.get_peak_memory() / (1024 * 1024)
+            cache = mx.metal.get_cache_memory() / (1024 * 1024)
+        else:
+            return {"active_mb": 0.0, "peak_mb": 0.0, "cache_mb": 0.0}
+
         result = {
             "active_mb": active,
             "peak_mb": peak,

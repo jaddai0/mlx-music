@@ -5,6 +5,7 @@ Provides a high-level interface for loading and generating
 music with the ACE-Step model.
 """
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -53,6 +54,24 @@ class GenerationConfig:
 
 
 @dataclass
+class GenerationTiming:
+    """Timing breakdown for generation pipeline."""
+
+    encode_sec: float = 0.0  # Text/lyric encoding time
+    denoise_sec: float = 0.0  # Diffusion loop time
+    decode_sec: float = 0.0  # Latent-to-audio decoding time
+    total_sec: float = 0.0  # Total generation time (excluding model load)
+    num_steps: int = 0  # Number of diffusion steps (for time_per_step calculation)
+
+    @property
+    def time_per_step_ms(self) -> Optional[float]:
+        """Time per diffusion step in milliseconds."""
+        if self.num_steps > 0 and self.denoise_sec > 0:
+            return (self.denoise_sec / self.num_steps) * 1000
+        return None
+
+
+@dataclass
 class GenerationOutput:
     """Output from music generation."""
 
@@ -60,6 +79,7 @@ class GenerationOutput:
     sample_rate: int
     duration: float
     latents: Optional[mx.array] = None
+    timing: Optional[GenerationTiming] = None
 
 
 class ACEStep:
@@ -357,6 +377,7 @@ class ACEStep:
         return_latents: bool = False,
         scheduler_type: str = "euler",
         callback: Optional[callable] = None,
+        return_timing: bool = False,
     ) -> GenerationOutput:
         """
         Generate music from text prompt.
@@ -370,15 +391,19 @@ class ACEStep:
             seed: Random seed for reproducibility
             speaker_embeds: Optional speaker embedding for voice cloning
             return_latents: Whether to return intermediate latents
-            scheduler_type: "euler" or "heun"
+            scheduler_type: "euler", "heun", or "dpm++" (DPM++ 2M Karras)
             callback: Optional callback(step, timestep, latents)
+            return_timing: Whether to include timing breakdown in output
 
         Returns:
-            GenerationOutput with audio and metadata
+            GenerationOutput with audio, metadata, and optional timing
 
         Raises:
             ValueError: If duration is outside valid range
         """
+        timing = GenerationTiming()
+        total_start = time.perf_counter()
+
         # Validate duration
         if duration < self.MIN_DURATION:
             raise ValueError(
@@ -415,18 +440,28 @@ class ACEStep:
         # Initialize noise
         latents = mx.random.normal(latent_shape).astype(self.dtype)
 
+        # === ENCODING PHASE ===
+        encode_start = time.perf_counter()
+
         # Encode text
         text_embeds, text_mask = self.encode_text(prompt)
+        mx.eval(text_embeds, text_mask)  # Force evaluation for accurate timing
 
         # Encode lyrics if provided
         if lyrics is not None:
             lyric_tokens, lyric_mask = self.encode_lyrics(lyrics)
+            mx.eval(lyric_tokens, lyric_mask)
         else:
             lyric_tokens, lyric_mask = None, None
+
+        timing.encode_sec = time.perf_counter() - encode_start
 
         # Get scheduler
         scheduler = get_scheduler(scheduler_type, shift=3.0)
         timesteps, _ = retrieve_timesteps(scheduler, num_inference_steps)
+
+        # === DENOISING PHASE ===
+        denoise_start = time.perf_counter()
 
         # Diffusion loop
         for i, t in enumerate(timesteps):
@@ -478,14 +513,24 @@ class ACEStep:
             # Evaluate for progress and memory management
             mx.eval(latents)
 
+        timing.denoise_sec = time.perf_counter() - denoise_start
+        timing.num_steps = num_inference_steps
+
+        # === DECODING PHASE ===
+        decode_start = time.perf_counter()
+
         # Decode to audio
         audio = self.decode_latents(latents)
+
+        timing.decode_sec = time.perf_counter() - decode_start
+        timing.total_sec = time.perf_counter() - total_start
 
         return GenerationOutput(
             audio=audio,
             sample_rate=44100,
             duration=duration,
             latents=latents if return_latents else None,
+            timing=timing if return_timing else None,
         )
 
     def __repr__(self) -> str:

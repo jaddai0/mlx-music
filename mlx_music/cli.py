@@ -18,7 +18,9 @@ CLI_MAX_DURATION = 600.0  # Maximum duration to prevent resource exhaustion (10 
 LOG_PROMPT_MAX_LENGTH = 50  # Maximum prompt length to show in logs
 
 # Model-specific default values
-ACE_STEP_DEFAULT_STEPS = 60
+# ACE-Step: DPM++ at 20 steps achieves similar quality to Euler at 60 steps (3x speedup)
+ACE_STEP_DEFAULT_STEPS = 20  # Optimized for DPM++ scheduler
+ACE_STEP_DEFAULT_SCHEDULER = "dpm++"
 ACE_STEP_DEFAULT_GUIDANCE = 15.0
 MUSICGEN_DEFAULT_GUIDANCE = 3.0
 STABLE_AUDIO_DEFAULT_STEPS = 100
@@ -191,9 +193,10 @@ Examples:
     gen_parser.add_argument(
         "--scheduler",
         type=str,
-        choices=["euler", "heun"],
-        default="euler",
-        help="Scheduler type for diffusion models (default: euler)",
+        choices=["euler", "heun", "dpm++"],
+        default=ACE_STEP_DEFAULT_SCHEDULER,
+        help="Scheduler type for diffusion models (default: dpm++). "
+             "DPM++ achieves similar quality to Euler with fewer steps (20 vs 60).",
     )
     gen_parser.add_argument(
         "--verbose",
@@ -278,8 +281,17 @@ def _generate_ace_step(args) -> None:
         logger.info(f"  Lyrics: {args.lyrics[:LOG_PROMPT_MAX_LENGTH]}...")
 
     # Default values for ACE-Step
-    steps = args.steps or ACE_STEP_DEFAULT_STEPS
+    # If using default scheduler (dpm++), use optimized step count
+    # If user explicitly chose euler/heun, use higher step count for quality
+    if args.steps is not None:
+        steps = args.steps
+    elif args.scheduler == "dpm++":
+        steps = ACE_STEP_DEFAULT_STEPS  # 20 steps optimized for DPM++
+    else:
+        steps = 60  # 60 steps for Euler/Heun
     guidance = args.guidance or ACE_STEP_DEFAULT_GUIDANCE
+
+    logger.info(f"  Scheduler: {args.scheduler} ({steps} steps)")
 
     # Progress callback with try/finally for cleanup
     pbar = tqdm(total=steps, desc="Generating")
