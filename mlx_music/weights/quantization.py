@@ -8,8 +8,15 @@ Uses MLX's native quantization for efficient inference:
 
 The native quantization actually stores weights in lower precision
 and uses optimized kernels for faster inference.
+
+Logging:
+    Uses ``logging.getLogger(__name__)`` (resolves to
+    ``mlx_music.weights.quantization``). Configure via the application's
+    root logger or ``logging.basicConfig()``. Verbose quantization
+    summaries are emitted at INFO level only when ``verbose=True``.
 """
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -17,6 +24,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
+
+# Module-level logger
+logger = logging.getLogger(__name__)
 
 
 class QuantizationMode(Enum):
@@ -111,6 +121,7 @@ def quantize_model(
     model: nn.Module,
     config: Optional[QuantizationConfig] = None,
     bits: Optional[int] = None,
+    verbose: bool = False,
 ) -> nn.Module:
     """
     Quantize a model using MLX's native quantization.
@@ -122,6 +133,7 @@ def quantize_model(
         model: Model to quantize (modified in-place)
         config: Quantization configuration
         bits: Override bits (4 or 8), ignored if config provided
+        verbose: Whether to print what's being quantized (useful for debugging)
 
     Returns:
         Quantized model (same object, modified in-place)
@@ -130,7 +142,7 @@ def quantize_model(
         >>> from mlx_music.weights.quantization import quantize_model, QuantizationConfig
         >>> model = ACEStepTransformer(config)
         >>> model.load_weights(...)
-        >>> quantize_model(model, QuantizationConfig.for_balanced())
+        >>> quantize_model(model, QuantizationConfig.for_balanced(), verbose=True)
     """
     if config is None:
         if bits is None:
@@ -145,6 +157,10 @@ def quantize_model(
     # Track if we've shown the Conv warning
     conv_warning_shown = [False]
 
+    # Track quantized layers for verbose output
+    quantized_layers = []
+    skipped_layers = []
+
     # Create predicate for nn.quantize
     def class_predicate(path: str, module: nn.Module) -> Union[bool, dict]:
         """Determine if/how to quantize a module.
@@ -153,6 +169,8 @@ def quantize_model(
         the default bits parameter in nn.quantize().
         """
         if _should_exclude(path, config):
+            if verbose:
+                skipped_layers.append((path, "excluded"))
             return False
 
         # Only quantize Linear layers (Conv layers don't support quantization yet)
@@ -168,9 +186,22 @@ def quantize_model(
                 conv_warning_shown[0] = True
             return False
 
+        # Skip layers where weight dimensions are too small for group_size
+        if hasattr(module, 'weight'):
+            min_dim = min(module.weight.shape)
+            if min_dim < config.group_size:
+                if verbose:
+                    skipped_layers.append((path, f"dim {min_dim} < group_size {config.group_size}"))
+                return False
+
         layer_bits = _get_bits_for_layer(path, config)
         if layer_bits >= 16:
+            if verbose:
+                skipped_layers.append((path, "bits>=16"))
             return False
+
+        if verbose:
+            quantized_layers.append((path, layer_bits))
 
         # Always return dict with explicit bits - don't rely on nn.quantize default
         return {"group_size": config.group_size, "bits": layer_bits}
@@ -181,6 +212,36 @@ def quantize_model(
         model,
         class_predicate=class_predicate,
     )
+
+    if verbose:
+        logger.info("=" * 60)
+        logger.info("Quantization Summary (%s mode)", config.mode.value)
+        logger.info("=" * 60)
+
+        # Group by component
+        attn_layers = [l for l in quantized_layers if "attn" in l[0].lower()]
+        ffn_layers = [l for l in quantized_layers if "ff" in l[0].lower() or "mlp" in l[0].lower()]
+        other_layers = [l for l in quantized_layers if l not in attn_layers and l not in ffn_layers]
+
+        logger.info("Quantized layers: %d total", len(quantized_layers))
+        logger.info("  - Attention: %d layers", len(attn_layers))
+        logger.info("  - FFN: %d layers", len(ffn_layers))
+        logger.info("  - Other: %d layers", len(other_layers))
+        logger.info("Skipped layers: %d", len(skipped_layers))
+
+        # FFN detail (since FFN is the bottleneck)
+        if ffn_layers:
+            logger.info("FFN layers quantized:")
+            for path, bits in ffn_layers[:10]:  # Show first 10
+                logger.info("  %s: %d-bit", path, bits)
+            if len(ffn_layers) > 10:
+                logger.info("  ... and %d more", len(ffn_layers) - 10)
+        else:
+            logger.warning("No FFN Linear layers found!")
+            logger.warning("Note: GLUMBConv FFN uses Conv1d, not Linear.")
+            logger.warning("Run quantize_conv1d_layers() to quantize Conv1d layers.")
+
+        logger.info("=" * 60)
 
     return model
 
@@ -593,8 +654,6 @@ def quantize_conv1d_layers(
             full_path = f"{path}.{name}" if path else name
 
             if isinstance(child, nn.Conv1d):
-                import logging
-
                 # MLX Conv1d weight shape is (out_channels, kernel_size, in_channels)
                 kernel_size = child.weight.shape[1]
                 if kernel_size == 1:
@@ -605,21 +664,19 @@ def quantize_conv1d_layers(
                         setattr(module, name, quantized)
                         num_quantized += 1
                         if verbose:
-                            print(f"Quantized Conv1d: {full_path}")
+                            logger.info("Quantized Conv1d: %s", full_path)
                     except ValueError as e:
                         # Expected validation errors (invalid bits, group_size)
-                        logging.warning(f"Skipped {full_path}: {e}")
+                        logger.warning("Skipped %s: %s", full_path, e)
                         num_skipped += 1
                     except Exception as e:
                         # Unexpected errors - log with full context for debugging
-                        logging.error(f"Failed to quantize Conv1d {full_path}: {type(e).__name__}: {e}")
-                        if verbose:
-                            print(f"Failed to quantize {full_path}: {e}")
+                        logger.error("Failed to quantize Conv1d %s: %s: %s", full_path, type(e).__name__, e)
                         num_skipped += 1
                 else:
                     num_skipped += 1
                     if verbose:
-                        print(f"Skipped Conv1d (kernel_size={kernel_size}): {full_path}")
+                        logger.info("Skipped Conv1d (kernel_size=%d): %s", kernel_size, full_path)
 
             elif isinstance(child, nn.Module):
                 process_module(child, full_path)
@@ -632,7 +689,7 @@ def quantize_conv1d_layers(
     process_module(model)
 
     if verbose:
-        print(f"Conv1d quantization: {num_quantized} quantized, {num_skipped} skipped")
+        logger.info("Conv1d quantization: %d quantized, %d skipped", num_quantized, num_skipped)
 
     return model, num_quantized
 
@@ -784,8 +841,8 @@ def quantize_model_with_stats(
     initial_metal = get_metal_memory_info()
 
     if verbose:
-        print(f"Initial model size: {initial_memory_mb:.2f} MB ({initial_params:,} params)")
-        print(f"Initial Metal memory: {initial_metal['active_mb']:.2f} MB active")
+        logger.info("Initial model size: %.2f MB (%s params)", initial_memory_mb, f"{initial_params:,}")
+        logger.info("Initial Metal memory: %.2f MB active", initial_metal['active_mb'])
 
     # Quantize Linear layers
     linear_count_before = sum(
@@ -812,9 +869,9 @@ def quantize_model_with_stats(
     final_metal = get_metal_memory_info()
 
     if verbose:
-        print(f"Final model size: {final_memory_mb:.2f} MB ({final_params:,} params)")
-        print(f"Final Metal memory: {final_metal['active_mb']:.2f} MB active")
-        print(f"Memory saved: {initial_memory_mb - final_memory_mb:.2f} MB")
+        logger.info("Final model size: %.2f MB (%s params)", final_memory_mb, f"{final_params:,}")
+        logger.info("Final Metal memory: %.2f MB active", final_metal['active_mb'])
+        logger.info("Memory saved: %.2f MB", initial_memory_mb - final_memory_mb)
 
     stats = QuantizationStats(
         initial_params=initial_params,

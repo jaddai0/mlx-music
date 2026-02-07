@@ -13,16 +13,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mlx_music")
 
-# CLI Constants
+# --- CLI Constants ---
+# All configurable limits and defaults are grouped here.
+
+# General limits
 CLI_MAX_DURATION = 600.0  # Maximum duration to prevent resource exhaustion (10 minutes)
 LOG_PROMPT_MAX_LENGTH = 50  # Maximum prompt length to show in logs
 
-# Model-specific default values
-# ACE-Step: DPM++ at 20 steps achieves similar quality to Euler at 60 steps (3x speedup)
+# ACE-Step v1 defaults
+# DPM++ at 20 steps achieves similar quality to Euler at 60 steps (3x speedup)
 ACE_STEP_DEFAULT_STEPS = 20  # Optimized for DPM++ scheduler
 ACE_STEP_DEFAULT_SCHEDULER = "dpm++"
 ACE_STEP_DEFAULT_GUIDANCE = 15.0
+
+# ACE-Step v1.5 defaults and validation
+ACE_STEP_V15_DEFAULT_STEPS = 8  # Turbo variant
+ACE_STEP_V15_DEFAULT_SHIFT = 3.0
+VALID_V15_VARIANTS = {"turbo", "base", "sft", "turbo-shift1", "turbo-shift3", "continuous"}
+V15_SHIFT_MIN = 0.0
+V15_SHIFT_MAX = 20.0
+
+# MusicGen defaults
 MUSICGEN_DEFAULT_GUIDANCE = 3.0
+
+# Stable Audio defaults
 STABLE_AUDIO_DEFAULT_STEPS = 100
 STABLE_AUDIO_DEFAULT_GUIDANCE = 7.0
 
@@ -47,7 +61,11 @@ def detect_model_family(model_path: str) -> str:
     if "stable-audio" in model_lower or "stabilityai/stable-audio" in model_lower:
         return "stable-audio"
 
-    # Check for ACE-Step patterns
+    # Check for ACE-Step v1.5 patterns (check before v1 since v1.5 contains "ace-step")
+    if "v15" in model_lower or "v1.5" in model_lower or "ace-step-1.5" in model_lower:
+        return "ace-step-v15"
+
+    # Check for ACE-Step v1 patterns
     if "ace-step" in model_lower or "ace_step" in model_lower:
         return "ace-step"
 
@@ -82,6 +100,22 @@ def validate_args(args) -> None:
     # Validate guidance if provided
     if args.guidance is not None and args.guidance <= 0:
         logger.error(f"Guidance scale must be positive, got {args.guidance}")
+        sys.exit(1)
+
+    # Validate v1.5-specific parameters
+    variant = getattr(args, "variant", None)
+    if variant is not None and variant not in VALID_V15_VARIANTS:
+        logger.error(
+            f"Invalid variant '{variant}'. "
+            f"Valid variants: {', '.join(sorted(VALID_V15_VARIANTS))}"
+        )
+        sys.exit(1)
+
+    shift = getattr(args, "shift", None)
+    if shift is not None and not (V15_SHIFT_MIN <= shift <= V15_SHIFT_MAX):
+        logger.error(
+            f"Shift must be between {V15_SHIFT_MIN} and {V15_SHIFT_MAX}, got {shift}"
+        )
         sys.exit(1)
 
 
@@ -131,7 +165,7 @@ Examples:
     gen_parser.add_argument(
         "--engine",
         type=str,
-        choices=["ace-step", "musicgen", "stable-audio"],
+        choices=["ace-step", "ace-step-v15", "musicgen", "stable-audio"],
         default=None,
         help="Model family to use (auto-detected from --model if not specified)",
     )
@@ -184,6 +218,25 @@ Examples:
         help="Random seed for reproducibility",
     )
     gen_parser.add_argument(
+        "--variant",
+        type=str,
+        default="turbo",
+        help="Model variant for ACE-Step v1.5 (turbo, base, sft, turbo-shift1, turbo-shift3)",
+    )
+    gen_parser.add_argument(
+        "--shift",
+        type=float,
+        default=None,
+        help="Timestep shift for ACE-Step v1.5 (default: variant-specific)",
+    )
+    gen_parser.add_argument(
+        "--quantization",
+        type=str,
+        choices=["int4", "int8", "mixed"],
+        default=None,
+        help="Quantization mode for ACE-Step v1.5 (int4, int8, mixed)",
+    )
+    gen_parser.add_argument(
         "--output",
         "-o",
         type=str,
@@ -230,7 +283,7 @@ def generate_command(args) -> None:
     engine = args.engine or detect_model_family(args.model)
 
     # Warn about incompatible parameter combinations
-    if args.lyrics and engine != "ace-step":
+    if args.lyrics and engine not in ("ace-step", "ace-step-v15"):
         logger.warning(f"--lyrics is only supported for ACE-Step. Ignoring for {engine}.")
 
     if args.negative_prompt and engine != "stable-audio":
@@ -245,6 +298,8 @@ def generate_command(args) -> None:
     try:
         if engine == "ace-step":
             _generate_ace_step(args)
+        elif engine == "ace-step-v15":
+            _generate_ace_step_v15(args)
         elif engine == "musicgen":
             _generate_musicgen(args)
         elif engine == "stable-audio":
@@ -255,11 +310,20 @@ def generate_command(args) -> None:
     except KeyboardInterrupt:
         logger.info("\nGeneration cancelled by user.")
         sys.exit(130)
-    except Exception as e:
+    except (ValueError, TypeError) as e:
+        logger.error(f"Invalid input: {e}")
+        sys.exit(1)
+    except (FileNotFoundError, OSError) as e:
+        logger.error(f"File error: {e}")
+        sys.exit(1)
+    except RuntimeError as e:
         logger.error(f"Generation failed: {e}")
         if args.verbose:
             import traceback
             traceback.print_exc()
+        sys.exit(1)
+    except ImportError as e:
+        logger.error(f"Missing dependency: {e}")
         sys.exit(1)
 
 
@@ -270,10 +334,13 @@ def _generate_ace_step(args) -> None:
     from mlx_music import ACEStep
     from mlx_music.utils.audio_io import save_audio
 
+    model_display = Path(args.model).name if "/" in args.model else args.model
     try:
         model = ACEStep.from_pretrained(args.model)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load ACE-Step model from '{args.model}': {e}") from e
+    except (FileNotFoundError, OSError) as e:
+        raise RuntimeError(f"Failed to load ACE-Step model '{model_display}': model not found") from e
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Failed to load ACE-Step model '{model_display}': {e}") from e
 
     logger.info(f"Generating {args.duration}s of music...")
     logger.info(f"  Prompt: {args.prompt}")
@@ -319,6 +386,53 @@ def _generate_ace_step(args) -> None:
     logger.info(f"Saved to: {args.output}")
 
 
+def _generate_ace_step_v15(args) -> None:
+    """Generate music using ACE-Step v1.5."""
+    from mlx_music import ACEStepV15
+    from mlx_music.utils.audio_io import save_audio
+
+    variant = getattr(args, "variant", "turbo")
+    quantization = getattr(args, "quantization", None)
+
+    # Sanitize model path for error messages (show basename only)
+    model_display = Path(args.model).name if "/" in args.model else args.model
+
+    try:
+        model = ACEStepV15.from_pretrained(
+            args.model,
+            variant=variant,
+            quantization=quantization,
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise RuntimeError(f"Failed to load ACE-Step v1.5 model '{model_display}': model not found") from e
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Failed to load ACE-Step v1.5 model '{model_display}': {e}") from e
+
+    logger.info(f"Generating {args.duration}s of music (v1.5 {variant})...")
+    logger.info(f"  Prompt: {args.prompt}")
+    if args.lyrics:
+        logger.info(f"  Lyrics: {args.lyrics[:LOG_PROMPT_MAX_LENGTH]}...")
+
+    steps = args.steps or ACE_STEP_V15_DEFAULT_STEPS
+    shift = args.shift if args.shift is not None else ACE_STEP_V15_DEFAULT_SHIFT
+
+    logger.info(f"  Steps: {steps}, Shift: {shift}")
+
+    result = model.generate(
+        prompt=args.prompt,
+        lyrics=args.lyrics or "",
+        duration=args.duration,
+        seed=args.seed,
+        shift=shift,
+        steps=steps,
+    )
+
+    # Save output
+    save_audio(result["audio"], args.output, result["sample_rate"])
+    logger.info(f"Generated audio at {result['sample_rate']}Hz")
+    logger.info(f"Saved to: {args.output}")
+
+
 def _generate_musicgen(args) -> None:
     """Generate music using MusicGen."""
     from tqdm import tqdm
@@ -326,10 +440,13 @@ def _generate_musicgen(args) -> None:
     from mlx_music import MusicGen
     from mlx_music.utils.audio_io import save_audio
 
+    model_display = Path(args.model).name if "/" in args.model else args.model
     try:
         model = MusicGen.from_pretrained(args.model)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load MusicGen model from '{args.model}': {e}") from e
+    except (FileNotFoundError, OSError) as e:
+        raise RuntimeError(f"Failed to load MusicGen model '{model_display}': model not found") from e
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Failed to load MusicGen model '{model_display}': {e}") from e
 
     logger.info(f"Generating {args.duration}s of music...")
     logger.info(f"  Prompt: {args.prompt}")
@@ -384,10 +501,13 @@ def _generate_stable_audio(args) -> None:
     from mlx_music import StableAudio
     from mlx_music.utils.audio_io import save_audio
 
+    model_display = Path(args.model).name if "/" in args.model else args.model
     try:
         model = StableAudio.from_pretrained(args.model)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load Stable Audio model from '{args.model}': {e}") from e
+    except (FileNotFoundError, OSError) as e:
+        raise RuntimeError(f"Failed to load Stable Audio model '{model_display}': model not found") from e
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Failed to load Stable Audio model '{model_display}': {e}") from e
 
     logger.info(f"Generating {args.duration}s of music...")
     logger.info(f"  Prompt: {args.prompt}")

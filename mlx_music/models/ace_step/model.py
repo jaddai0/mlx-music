@@ -6,6 +6,7 @@ music with the ACE-Step model.
 """
 
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -122,6 +123,32 @@ class ACEStep:
             shift=3.0,
         )
 
+    def clear_kv_cache(self):
+        """Clear all KV caches in cross-attention layers.
+
+        Call this between generations to ensure fresh cache state and free memory.
+        The cache is automatically managed per batch_size, but explicit clearing
+        is recommended for clean state between unrelated generations.
+        """
+        for block in self.transformer.transformer_blocks:
+            if hasattr(block, "cross_attn") and hasattr(block.cross_attn, "clear_kv_cache"):
+                block.cross_attn.clear_kv_cache()
+
+    @contextmanager
+    def kv_cache_scope(self):
+        """Context manager that clears KV cache on entry and exit.
+
+        Usage:
+            with model.kv_cache_scope():
+                for step in timesteps:
+                    output = model.forward(...)
+        """
+        self.clear_kv_cache()
+        try:
+            yield
+        finally:
+            self.clear_kv_cache()
+
     @classmethod
     def from_pretrained(
         cls,
@@ -222,6 +249,11 @@ class ACEStep:
         except Exception as e:
             print(f"Warning: Could not load lyric tokenizer: {e}")
             print("Lyric encoding will use placeholder tokens")
+
+        # Enable mx.compile() for transformer blocks (~10-15ms savings per step)
+        print("Enabling graph compilation...")
+        transformer.enable_compile()
+        print("Graph compilation enabled!")
 
         return cls(
             transformer=transformer,
@@ -358,6 +390,95 @@ class ACEStep:
             lyric_mask=lyric_mask,
         )
 
+    def _prepare_batched_cfg_constants(
+        self,
+        text_embeds: mx.array,
+        text_mask: mx.array,
+        speaker_embeds: Optional[mx.array],
+        lyric_tokens: Optional[mx.array],
+        lyric_mask: Optional[mx.array],
+    ) -> Dict[str, Optional[mx.array]]:
+        """Pre-concatenate constant batched tensors for CFG forward passes.
+
+        Called once before the denoising loop. Returns pre-batched [cond, uncond]
+        tensors that are reused across all steps, avoiding per-step concatenation
+        of constant inputs (text, speaker, lyrics).
+        """
+        batched = {
+            "text_embeds": mx.concatenate(
+                [text_embeds, mx.zeros_like(text_embeds)], axis=0
+            ),
+            "text_mask": mx.concatenate(
+                [text_mask, mx.zeros_like(text_mask)], axis=0
+            ),
+            "speaker_embeds": None,
+            "lyric_tokens": None,
+            "lyric_mask": None,
+        }
+
+        if speaker_embeds is not None:
+            batched["speaker_embeds"] = mx.concatenate(
+                [speaker_embeds, mx.zeros_like(speaker_embeds)], axis=0
+            )
+
+        if lyric_tokens is not None:
+            batched["lyric_tokens"] = mx.concatenate(
+                [lyric_tokens, mx.zeros_like(lyric_tokens)], axis=0
+            )
+            batched["lyric_mask"] = mx.concatenate(
+                [lyric_mask, mx.zeros_like(lyric_mask)], axis=0
+            )
+
+        return batched
+
+    def _batched_cfg_forward(
+        self,
+        latents: mx.array,
+        timestep: mx.array,
+        batched_constants: Dict[str, Optional[mx.array]],
+        guidance_scale: float,
+    ) -> mx.array:
+        """Batched CFG forward pass - processes conditional and unconditional in single pass.
+
+        This optimization batches the two CFG branches into a single forward pass with
+        batch_size=2, leveraging GPU parallelism. This can provide 40-50ms savings per step.
+
+        Only latents and timestep are concatenated per step (they change). All other
+        inputs (text, speaker, lyrics) are pre-batched once via _prepare_batched_cfg_constants.
+
+        Args:
+            latents: Input latents (batch, channels, height, width)
+            timestep: Timestep array (batch,)
+            batched_constants: Pre-batched [cond, uncond] tensors from
+                _prepare_batched_cfg_constants (constant across steps)
+            guidance_scale: CFG guidance scale
+
+        Returns:
+            CFG-combined noise prediction (batch, channels, height, width)
+        """
+        # Only latents and timestep change per step - concatenate these
+        batched_latents = mx.concatenate([latents, latents], axis=0)
+        batched_timestep = mx.concatenate([timestep, timestep], axis=0)
+
+        # Single batched forward pass (processes both CFG branches in parallel)
+        batched_pred = self.transformer(
+            hidden_states=batched_latents,
+            timestep=batched_timestep,
+            encoder_text_hidden_states=batched_constants["text_embeds"],
+            text_attention_mask=batched_constants["text_mask"],
+            speaker_embeds=batched_constants["speaker_embeds"],
+            lyric_token_idx=batched_constants["lyric_tokens"],
+            lyric_mask=batched_constants["lyric_mask"],
+        )
+
+        # Split batch back: (2, C, H, W) -> (1, C, H, W), (1, C, H, W)
+        noise_pred, noise_pred_uncond = mx.split(batched_pred, 2, axis=0)
+
+        # Apply CFG formula: uncond + scale * (cond - uncond)
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred - noise_pred_uncond)
+
+        return noise_pred
+
     # Duration constraints (in seconds)
     MIN_DURATION = 1.0  # ~1 second minimum
     MAX_DURATION = 240.0  # ~4 minutes maximum
@@ -463,55 +584,54 @@ class ACEStep:
         # === DENOISING PHASE ===
         denoise_start = time.perf_counter()
 
-        # Diffusion loop
-        for i, t in enumerate(timesteps):
-            # Expand timestep for batch
-            timestep = mx.array([t] * latents.shape[0])
+        # Diffusion loop with batched CFG optimization
+        # When guidance_scale > 1.0, we batch conditional and unconditional passes
+        # into a single forward pass with batch_size=2 for ~40-50ms savings per step
+        use_batched_cfg = guidance_scale > 1.0
 
-            # Model prediction (conditional)
-            noise_pred = self._transformer_forward(
-                latents,
-                timestep,
-                text_embeds,
-                text_mask,
-                speaker_embeds,
-                lyric_tokens,
-                lyric_mask,
+        # Pre-concatenate constant batched tensors once (reused across all steps)
+        batched_constants = None
+        if use_batched_cfg:
+            batched_constants = self._prepare_batched_cfg_constants(
+                text_embeds, text_mask, speaker_embeds, lyric_tokens, lyric_mask
             )
 
-            # Classifier-free guidance
-            if guidance_scale > 1.0:
-                # Evaluate conditional prediction first to free intermediate tensors
-                mx.eval(noise_pred)
-                # Get unconditional prediction
-                noise_pred_uncond = self._transformer_forward(
-                    latents,
-                    timestep,
-                    mx.zeros_like(text_embeds),
-                    mx.zeros_like(text_mask),
-                    None,
-                    None,
-                    None,
-                )
-                # Force evaluation to free intermediate tensors before CFG combination
-                mx.eval(noise_pred_uncond)
+        # kv_cache_scope clears cache on entry and exit (even on error)
+        with self.kv_cache_scope():
+            for i, t in enumerate(timesteps):
+                # Expand timestep for batch (single value repeated for batch dimension)
+                step_timestep = mx.array([t] * latents.shape[0])
 
-                # CFG combination
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred - noise_pred_uncond)
+                if use_batched_cfg:
+                    # Batched CFG: single forward pass with batch_size=2
+                    noise_pred = self._batched_cfg_forward(
+                        latents,
+                        step_timestep,
+                        batched_constants,
+                        guidance_scale,
+                    )
+                else:
+                    # No CFG: single forward pass
+                    noise_pred = self._transformer_forward(
+                        latents,
+                        step_timestep,
+                        text_embeds,
+                        text_mask,
+                        speaker_embeds,
+                        lyric_tokens,
+                        lyric_mask,
+                    )
 
-                # Evaluate combined prediction to free memory
-                mx.eval(noise_pred)
+                # Scheduler step
+                output = scheduler.step(noise_pred, t, latents)
+                latents = output.prev_sample
 
-            # Scheduler step
-            output = scheduler.step(noise_pred, t, latents)
-            latents = output.prev_sample
+                # Callback
+                if callback is not None:
+                    callback(i, t, latents)
 
-            # Callback
-            if callback is not None:
-                callback(i, t, latents)
-
-            # Evaluate for progress and memory management
-            mx.eval(latents)
+                # MLX lazy computation materializer for memory management
+                mx.eval(latents)
 
         timing.denoise_sec = time.perf_counter() - denoise_start
         timing.num_steps = num_inference_steps

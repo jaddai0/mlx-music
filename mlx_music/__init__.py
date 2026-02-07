@@ -39,6 +39,7 @@ __version__ = "0.1.0"
 
 # Lazy-loaded modules - improves import time significantly
 _ace_step = None
+_ace_step_v15 = None
 _musicgen = None
 _stable_audio = None
 
@@ -51,6 +52,16 @@ def _get_ace_step():
 
         _ace_step = ACEStep
     return _ace_step
+
+
+def _get_ace_step_v15():
+    """Lazy load ACEStepV15 model class."""
+    global _ace_step_v15
+    if _ace_step_v15 is None:
+        from mlx_music.models.ace_step_v15 import ACEStepV15
+
+        _ace_step_v15 = ACEStepV15
+    return _ace_step_v15
 
 
 def _get_musicgen():
@@ -77,6 +88,8 @@ def __getattr__(name: str):
     """Module-level lazy attribute access."""
     if name == "ACEStep":
         return _get_ace_step()
+    if name == "ACEStepV15":
+        return _get_ace_step_v15()
     if name == "MusicGen":
         return _get_musicgen()
     if name == "StableAudio":
@@ -86,7 +99,7 @@ def __getattr__(name: str):
 
 def __dir__():
     """List available module attributes."""
-    return ["ACEStep", "MusicGen", "StableAudio", "__version__"]
+    return ["ACEStep", "ACEStepV15", "MusicGen", "StableAudio", "__version__"]
 
 
-__all__ = ["ACEStep", "MusicGen", "StableAudio", "__version__"]
+__all__ = ["ACEStep", "ACEStepV15", "MusicGen", "StableAudio", "__version__"]

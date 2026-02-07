@@ -61,8 +61,12 @@ class LoRALinear(nn.Module):
         # Validate parameters
         if rank <= 0:
             raise ValueError(f"rank must be positive, got {rank}")
+        if rank > 1024:
+            raise ValueError(f"rank must be <= 1024, got {rank}")
         if alpha <= 0:
             raise ValueError(f"alpha must be positive, got {alpha}")
+        if alpha > 4096:
+            raise ValueError(f"alpha must be <= 4096, got {alpha}")
         if not 0.0 <= dropout < 1.0:
             raise ValueError(f"dropout must be in [0, 1), got {dropout}")
 
@@ -75,8 +79,8 @@ class LoRALinear(nn.Module):
         # Original (frozen) weights
         if original_layer is not None:
             self.weight = original_layer.weight
-            # nn.Linear always has bias attribute, but it may be None
-            self.bias = original_layer.bias if original_layer.bias is not None else None
+            # MLX nn.Linear may not have a bias attribute at all when bias=False
+            self.bias = getattr(original_layer, "bias", None)
         else:
             # Initialize fresh weights (for testing)
             self.weight = mx.random.normal(shape=(out_features, in_features)) * 0.02
@@ -175,7 +179,7 @@ def _get_module_children(module: nn.Module) -> List[Tuple[str, Any]]:
 
 def _replace_linear_with_lora(
     module: nn.Module,
-    target_names: List[str],
+    target_names: set,
     rank: int,
     alpha: float,
     dropout: float = 0.0,
@@ -187,7 +191,8 @@ def _replace_linear_with_lora(
 
     Args:
         module: Module to process
-        target_names: Names of Linear layers to replace (e.g., ["to_q", "to_k", "to_v"])
+        target_names: Set of target layer names for O(1) lookup
+            (e.g., {"to_q", "to_k", "to_v"})
         rank: LoRA rank
         alpha: LoRA scaling factor
         dropout: LoRA dropout
@@ -199,6 +204,11 @@ def _replace_linear_with_lora(
 
     Raises:
         RecursionError: If module tree exceeds max depth (100)
+
+    Testing:
+        Test with nested module trees, circular references (via shared
+        submodules), and lists containing both nn.Linear and nn.Module items.
+        See test_ace_step.py for comprehensive LoRA replacement tests.
     """
     # Prevent infinite recursion on deeply nested or circular structures
     max_depth = 100
@@ -212,6 +222,8 @@ def _replace_linear_with_lora(
         return 0
     _visited.add(id(module))
 
+    target_set = target_names
+
     replaced = 0
 
     # Get child attributes from the module
@@ -220,9 +232,9 @@ def _replace_linear_with_lora(
             continue
 
         if isinstance(child, list):
-            # Handle list attributes (like to_out = [Linear, Dropout])
+            # Handle list attributes (like to_out = [Linear, Dropout], or layers = [Layer, ...])
             for i, item in enumerate(child):
-                if isinstance(item, nn.Linear) and not isinstance(item, LoRALinear) and name in target_names:
+                if isinstance(item, nn.Linear) and not isinstance(item, LoRALinear) and name in target_set:
                     lora_layer = LoRALinear(
                         in_features=item.weight.shape[1],
                         out_features=item.weight.shape[0],
@@ -233,7 +245,12 @@ def _replace_linear_with_lora(
                     )
                     child[i] = lora_layer
                     replaced += 1
-        elif isinstance(child, nn.Linear) and not isinstance(child, LoRALinear) and name in target_names:
+                elif isinstance(item, nn.Module) and not isinstance(item, LoRALinear):
+                    # Recurse into nn.Module items in lists (e.g., DiT layers)
+                    replaced += _replace_linear_with_lora(
+                        item, target_set, rank, alpha, dropout, _depth + 1, _visited
+                    )
+        elif isinstance(child, nn.Linear) and not isinstance(child, LoRALinear) and name in target_set:
             # Direct Linear layer replacement
             lora_layer = LoRALinear(
                 in_features=child.weight.shape[1],
@@ -248,7 +265,7 @@ def _replace_linear_with_lora(
         elif isinstance(child, nn.Module) and not isinstance(child, LoRALinear):
             # Recurse into submodules (but not into LoRALinear which is also nn.Module)
             replaced += _replace_linear_with_lora(
-                child, target_names, rank, alpha, dropout, _depth + 1, _visited
+                child, target_set, rank, alpha, dropout, _depth + 1, _visited
             )
 
     return replaced
@@ -302,7 +319,9 @@ def apply_lora_to_model(
             "to_add_out",
         ]
 
-    return _replace_linear_with_lora(model, target_modules, rank, alpha, dropout)
+    # Convert to set once for O(1) lookups throughout recursion
+    target_set = set(target_modules)
+    return _replace_linear_with_lora(model, target_set, rank, alpha, dropout)
 
 
 def get_lora_parameters(model: nn.Module) -> Dict[str, mx.array]:
@@ -347,6 +366,12 @@ def merge_lora_weights(model: nn.Module, _visited: Optional[set] = None) -> None
         This modifies the model in-place. The LoRA layers remain
         but their adaptations are folded into the base weights.
         The LoRA matrices are reset to zero.
+
+    Testing:
+        Verify merged weights equal W + (alpha/rank) * B @ A.
+        Verify LoRA matrices are zeroed after merge. Verify forward
+        pass output is unchanged after merge (numerically equivalent).
+        Test with circular module references via _visited parameter.
     """
     # Track visited modules to prevent cycles
     if _visited is None:
