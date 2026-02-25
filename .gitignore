@@ -1,14 +1,13 @@
-# Byte-compiled / optimized / DLL files
+# -----------------------------------------------------------------------------
+# mlx-music workspace hygiene
+# -----------------------------------------------------------------------------
+
+# Python / Packaging
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
-build/
 develop-eggs/
 dist/
 downloads/
@@ -24,71 +23,74 @@ wheels/
 .installed.cfg
 *.egg
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Translations
-*.mo
-*.pot
-
-# Environments
-.env
-.venv
-env/
+# Virtual environments
 venv/
 ENV/
-env.bak/
-venv.bak/
+env/
+.venv/
 
-# IDE
+# Testing / quality tooling
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+coverage.xml
+
+# IDE / editor metadata
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# macOS
+# OS generated files
 .DS_Store
+.DS_Store?
 .AppleDouble
 .LSOverride
-._*
 
-# Model weights (files, not source directories)
+# Build artifacts
+build/
+
+# ML artifacts
 *.safetensors
+*.gguf
 *.bin
 *.pt
 *.pth
-checkpoints/
-pretrained/
+*.ckpt
+*.h5
+*.onnx
 
-# Audio files
+# Workspace outputs and temporary data
+outputs/
+output/
+runs/
+logs/
+checkpoints/
+tmp/
+tmp*/
+temp/
+temp*/
+results/
+wandb/
+mlruns/
+
+# Media
+*.mp4
 *.wav
 *.mp3
 *.flac
 *.ogg
-output/
+*.m4a
+*.aac
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webm
 
-# Jupyter
-.ipynb_checkpoints/
-
-# mypy
-.mypy_cache/
+# Logs and reports
+*.log
+*.tmp
+*.temp

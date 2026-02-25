@@ -1,0 +1,109 @@
+{
+  "timestamp": "2026-02-02T20:22:15.031660",
+  "config": {
+    "ace_step_path": "/Users/dustinpainter/Dev-Projects/audio-models/ACEStep-models/ACE-Step-v1-3.5B",
+    "musicgen_path": "/Users/dustinpainter/Dev-Projects/audio-models/MusicGen-small",
+    "stable_audio_path": "/Users/dustinpainter/Dev-Projects/audio-models/StableAudio-models/stable-audio-open-1.0",
+    "prompt": "electronic dance music with synthesizers and drums",
+    "duration": 5.0,
+    "seed": 42,
+    "runs": 2,
+    "ace_step_steps": 60,
+    "ace_step_cfg_scale": 15.0,
+    "musicgen_top_k": 250,
+    "musicgen_temperature": 1.0,
+    "musicgen_cfg_scale": 3.0,
+    "stable_audio_steps": 100,
+    "stable_audio_cfg_scale": 7.0
+  },
+  "results": [
+    {
+      "model_name": "ACE-Step",
+      "quantization": "bfloat16",
+      "scheduler": "euler",
+      "steps": 60,
+      "duration_requested": 5.0,
+      "load_time_sec": 1.0774772920121904,
+      "encode_time_sec": 0.0,
+      "denoise_time_sec": 11.839829042000929,
+      "decode_time_sec": 0.0,
+      "total_time_sec": 12.91730633401312,
+      "time_per_step_ms": 197.33048403334882,
+      "model_memory_mb": 32.000274658203125,
+      "peak_memory_mb": 6898.528695106506,
+      "audio_duration_sec": 4.922630385487528,
+      "sample_rate": 44100,
+      "channels": 1,
+      "realtime_factor": 0.41576870476971045,
+      "rms_energy": 0.9357873797416687,
+      "dynamic_range_db": 85.38565826416016,
+      "spectral_centroid_hz": 10127.685609484946,
+      "is_silent": false,
+      "is_clipped": true,
+      "clipped_sample_count": 224486,
+      "clap_score": null,
+      "audio_file": "benchmark_results/scheduler_comparison/audio_samples/ace_step_bfloat16_euler_60steps.wav"
+    },
+    {
+      "model_name": "ACE-Step",
+      "quantization": "bfloat16",
+      "scheduler": "euler",
+      "steps": 60,
+      "duration_requested": 5.0,
+      "load_time_sec": 1.0273031659889966,
+      "encode_time_sec": 0.0,
+      "denoise_time_sec": 11.767387041996699,
+      "decode_time_sec": 0.0,
+      "total_time_sec": 12.794690207985695,
+      "time_per_step_ms": 196.12311736661164,
+      "model_memory_mb": 32.000274658203125,
+      "peak_memory_mb": 6898.535893440247,
+      "audio_duration_sec": 4.922630385487528,
+      "sample_rate": 44100,
+      "channels": 1,
+      "realtime_factor": 0.4183282463574218,
+      "rms_energy": 0.934194028377533,
+      "dynamic_range_db": 83.88896942138672,
+      "spectral_centroid_hz": 10021.00065384422,
+      "is_silent": false,
+      "is_clipped": true,
+      "clipped_sample_count": 220272,
+      "clap_score": null,
+      "audio_file": "benchmark_results/scheduler_comparison/audio_samples/ace_step_bfloat16_euler_60steps.wav"
+    }
+  ],
+  "scheduler_comparison": [
+    {
+      "model_name": "ACE-Step",
+      "scheduler": "euler",
+      "steps": 20,
+      "total_time_sec": 4.496572375006508,
+      "realtime_factor": 1.3987417888269729,
+      "quality_score": 1.0
+    },
+    {
+      "model_name": "ACE-Step",
+      "scheduler": "euler",
+      "steps": 60,
+      "total_time_sec": 12.662245542014716,
+      "realtime_factor": 0.4200268146923589,
+      "quality_score": 1.0
+    },
+    {
+      "model_name": "ACE-Step",
+      "scheduler": "dpm++",
+      "steps": 20,
+      "total_time_sec": 4.6138350420224015,
+      "realtime_factor": 1.3569720148566997,
+      "quality_score": 1.0
+    },
+    {
+      "model_name": "ACE-Step",
+      "scheduler": "dpm++",
+      "steps": 60,
+      "total_time_sec": 12.799617540993495,
+      "realtime_factor": 0.41533046898745285,
+      "quality_score": 1.0
+    }
+  ]
+}
